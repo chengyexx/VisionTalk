@@ -11,9 +11,15 @@ from app.services.graph import graph, ConversationState
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["websocket"])
 
+# Global flag for barge-in support
+_pipeline_interrupted = False
+
 
 async def run_pipeline(ws: WebSocket, audio_bytes: bytes, frame_base64: str):
-    """Run the full ASR → VLM → TTS pipeline and stream results back through WS."""
+    """Run the full ASR → VLM → TTS pipeline. Checks for interrupt between nodes."""
+    global _pipeline_interrupted
+    _pipeline_interrupted = False
+
     config = {"configurable": {"thread_id": "vision-talk-session"}}
 
     initial_state: ConversationState = {
@@ -28,41 +34,46 @@ async def run_pipeline(ws: WebSocket, audio_bytes: bytes, frame_base64: str):
     }
 
     try:
-        # Stream each node's output as the graph executes
         async for event in graph.astream(initial_state, config):
+            if _pipeline_interrupted:
+                logger.info("[Pipeline] Interrupted by user")
+                await ws.send_json({"type": "interrupt_ack"})
+                return
+
             for node_name, node_output in event.items():
+                if _pipeline_interrupted:
+                    break
+
                 if node_name == "asr":
                     text = node_output.get("asr_text", "")
                     if text:
                         await ws.send_json({"type": "asr_text", "text": text})
-                        logger.info(f"[Pipeline] ASR: {text[:50]}...")
 
                 elif node_name == "vlm":
                     text = node_output.get("vlm_response", "")
                     if text:
                         await ws.send_json({"type": "vlm_text", "text": text})
-                        logger.info(f"[Pipeline] VLM: {text[:50]}...")
 
                 elif node_name == "tts":
                     audio = node_output.get("tts_audio", b"")
                     if audio:
-                        # Send audio as base64 for browser playback
                         audio_b64 = base64.b64encode(audio).decode("utf-8")
                         await ws.send_json({
                             "type": "tts_audio",
                             "data": audio_b64,
                             "format": "mp3",
                         })
-                        logger.info(f"[Pipeline] TTS: {len(audio)} bytes")
 
     except Exception as e:
-        logger.error(f"[Pipeline] Error: {e}")
-        await ws.send_json({"type": "error", "message": str(e)})
+        if not _pipeline_interrupted:
+            logger.error(f"[Pipeline] Error: {e}")
+            await ws.send_json({"type": "error", "message": str(e)})
 
 
 @router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     """Main WebSocket endpoint for Vision Talk communication."""
+    global _pipeline_interrupted
     await ws.accept()
     logger.info("WebSocket client connected")
 
@@ -74,7 +85,6 @@ async def websocket_endpoint(ws: WebSocket):
             msg_type = message.get("type", "unknown")
 
             if msg_type == "frame":
-                # Legacy frame-only message (PR2 compatible)
                 frame_data = message.get("data", "")
                 frame_size = len(frame_data)
                 logger.info(f"[Frame] Received: {frame_size:,} bytes")
@@ -85,7 +95,6 @@ async def websocket_endpoint(ws: WebSocket):
                 })
 
             elif msg_type == "pipeline":
-                # Full pipeline: frame + audio → ASR → VLM → TTS
                 frame_data = message.get("frame", "")
                 audio_b64 = message.get("audio", "")
 
@@ -103,13 +112,11 @@ async def websocket_endpoint(ws: WebSocket):
                     f"[Pipeline] Received — frame: {len(frame_data):,} chars, audio: {len(audio_bytes):,} bytes"
                 )
                 await ws.send_json({"type": "pipeline_start"})
-
-                # Run pipeline in background, WS stays open for streaming results
                 await run_pipeline(ws, audio_bytes, frame_data)
 
             elif msg_type == "interrupt":
-                # Barge-in: stop current pipeline (PR5)
-                logger.info("[Interrupt] Received")
+                logger.info("[Interrupt] Received — stopping pipeline")
+                _pipeline_interrupted = True
                 await ws.send_json({"type": "interrupt_ack"})
 
             else:

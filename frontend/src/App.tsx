@@ -32,12 +32,14 @@ function App() {
   const [frameCount, setFrameCount] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string>("");
+  const isAiSpeakingRef = useRef(false); // Track if AI is currently responding
 
   // Handle incoming WS messages from LangGraph pipeline
   const handleMessage = useCallback((data: unknown) => {
     const msg = data as Record<string, unknown>;
     switch (msg.type) {
       case "pipeline_start":
+        isAiSpeakingRef.current = true;
         setMessages((prev) => [...prev, newMsg("system", "AI 处理中...")]);
         break;
       case "asr_text":
@@ -55,6 +57,10 @@ function App() {
         setIsPlaying(true);
         break;
       }
+      case "interrupt_ack":
+        isAiSpeakingRef.current = false;
+        setMessages((prev) => [...prev, newMsg("system", "AI 已停止")]);
+        break;
       case "error":
         setMessages((prev) => [...prev, newMsg("system", `错误: ${msg.message}`)]);
         break;
@@ -66,19 +72,43 @@ function App() {
   const audioCapture = useAudioCapture();
   const isRecordingRef = useRef(false);
 
-  // VAD speech start → start recording audio
+  // VAD speech start → interrupt if AI is speaking, otherwise start recording
   const handleSpeechStart = useCallback(async () => {
+    // Barge-in: AI is currently responding → interrupt it
+    if (isAiSpeakingRef.current) {
+      isAiSpeakingRef.current = false;
+      setIsPlaying(false);
+      isRecordingRef.current = false;
+      setMessages((prev) => [...prev, newMsg("system", "用户打断 — 重新聆听...")]);
+
+      if (wsStatus === "connected") {
+        send({ type: "interrupt" });
+      }
+
+      // Start new capture after interrupt
+      await audioCapture.stop(); // Stop any previous recording
+      await audioCapture.start();
+      isRecordingRef.current = true;
+
+      const frame = cameraRef.current?.captureFrame();
+      if (frame) {
+        lastFrameRef.current = frame;
+        setFrameCount((c) => c + 1);
+      }
+      return;
+    }
+
+    // Normal flow: start recording
     setMessages((prev) => [...prev, newMsg("system", "正在聆听...")]);
     await audioCapture.start();
     isRecordingRef.current = true;
 
-    // Capture frame on speech start
     const frame = cameraRef.current?.captureFrame();
     if (frame) {
       lastFrameRef.current = frame;
       setFrameCount((c) => c + 1);
     }
-  }, [audioCapture]);
+  }, [audioCapture, wsStatus, send]);
 
   // VAD speech end → stop recording → send pipeline message
   const handleSpeechEnd = useCallback(async () => {
@@ -134,7 +164,7 @@ function App() {
           <AudioPlayer
             audioUrl={audioUrl}
             isPlaying={isPlaying}
-            onEnded={() => setIsPlaying(false)}
+            onEnded={() => { setIsPlaying(false); isAiSpeakingRef.current = false; }}
           />
         </div>
       </main>
