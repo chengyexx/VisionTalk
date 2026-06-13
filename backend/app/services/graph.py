@@ -10,6 +10,7 @@ from typing import TypedDict
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from app.services.asr import asr_node
+from app.services.vlm import vlm_node
 
 
 class ConversationState(TypedDict):
@@ -30,12 +31,6 @@ class ConversationState(TypedDict):
 
     # Control
     interrupted: bool           # True if user barge-in detected
-
-
-def vlm_node(state: ConversationState) -> dict:
-    """Placeholder: visual understanding + response generation."""
-    # TODO: PR3-4 — integrate VLM service
-    return {"vlm_response": ""}
 
 
 def tts_node(state: ConversationState) -> dict:
