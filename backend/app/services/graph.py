@@ -9,6 +9,7 @@ from typing import TypedDict
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from app.services.asr import asr_node
 
 
 class ConversationState(TypedDict):
@@ -29,12 +30,6 @@ class ConversationState(TypedDict):
 
     # Control
     interrupted: bool           # True if user barge-in detected
-
-
-def asr_node(state: ConversationState) -> dict:
-    """Placeholder: transcribe audio to text."""
-    # TODO: PR3-3 — integrate ASR service
-    return {"asr_text": ""}
 
 
 def vlm_node(state: ConversationState) -> dict:
