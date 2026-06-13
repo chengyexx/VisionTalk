@@ -6,7 +6,7 @@ Combines key frame + ASR text for multimodal reasoning and response generation.
 import logging
 import os
 
-from app.services.llm_client import chat
+from app.services.llm_client import chat, chat_sync
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,35 @@ SYSTEM_PROMPT = (
     "4. 如果看不清或不确定，诚实说明\n"
     "5. 使用中文回复"
 )
+
+
+async def summarize_visual(vlm_response: str) -> str:
+    """
+    Generate a short text summary of the current visual context.
+    Uses a cheap text-only model to keep costs minimal.
+    This summary replaces the raw image Base64 in conversation history,
+    preventing token explosion across multi-turn conversations.
+    """
+    if not vlm_response.strip():
+        return ""
+
+    try:
+        summary = await chat_sync(
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"用一句话（不超过30字）概括以下AI回复中描述的画面内容。"
+                    f"只描述客观画面，不要包含AI的主观评论：\n\n{vlm_response}"
+                ),
+            }],
+            model="deepseek/deepseek-chat",  # Cheap text-only model
+            temperature=0,
+            max_tokens=64,
+        )
+        return summary.strip()
+    except Exception as e:
+        logger.warning(f"Visual summarization failed: {e}")
+        return ""
 
 
 async def vlm_node(state: dict) -> dict:
@@ -96,10 +125,21 @@ async def vlm_node(state: dict) -> dict:
 
     logger.info(f"VLM response: {full_text[:100]}..." if len(full_text) > 100 else f"VLM response: {full_text}")
 
-    # Append to conversation history (text only)
+    # Token compression: generate text summary to replace raw image
+    visual_summary = await summarize_visual(full_text) if key_frame else visual_summary
+
+    # Append to conversation history (text only, no images — key compression step)
+    user_msg = asr_text
+    if visual_summary:
+        user_msg = f"[画面：{visual_summary}]\n{asr_text}"
+    messages.append({"role": "user", "content": user_msg})
     messages.append({"role": "assistant", "content": full_text})
+
+    logger.info(f"VLM: memory compressed, visual_summary={visual_summary[:50]}..." if len(visual_summary) > 50 else f"VLM: memory compressed, visual_summary={visual_summary}")
 
     return {
         "vlm_response": full_text,
+        "visual_summary": visual_summary,
+        "key_frame": "",  # Clear — prevents image accumulation across turns
         "messages": messages,
     }
