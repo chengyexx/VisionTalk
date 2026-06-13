@@ -165,6 +165,87 @@ async def tts_node(state: ConversationState) -> dict:
 
 ---
 
+## Commit 6: LangGraph 记忆降维（Token 压缩）
+
+**变更：**
+- 在 VLM 节点执行后，提取「文本描述摘要」替代原始图像存入对话历史
+- `ConversationState` 新增 `visual_summary` 字段，存储上轮画面的文字概括
+- 每轮发给 VLM 的上下文只包含：「最新 1 张图片 + 历史视觉摘要（纯文本）」
+- 历史图片的 Base64 数据在每轮结束后丢弃，不随对话累积
+
+**文件：**
+- `backend/app/services/graph.py` — 状态字段 + 压缩逻辑
+- `backend/app/services/vlm.py` — 生成视觉摘要
+
+```python
+class ConversationState(TypedDict):
+    messages: list           # 对话历史（纯文本，不含历史图片）
+    audio_chunk: bytes
+    key_frame: str           # 仅保留当前帧 (Base64)
+    visual_summary: str      # 上轮画面的文本摘要 ← 新增
+    asr_text: str
+    vlm_response: str
+    tts_audio: bytes
+    interrupted: bool
+
+async def summarize_visual(key_frame: str, vlm_response: str) -> str:
+    """用轻量模型提取当前画面的文字描述，替代图片存入记忆"""
+    summary = await chat(
+        messages=[{"role": "user", "content": f"用一句话概括这轮对话中用户展示的画面：回复内容是'{vlm_response}'"}],
+        model="deepseek/deepseek-chat"  # 用纯文本模型即可，成本极低
+    )
+    return summary
+
+async def vlm_node(state: ConversationState) -> dict:
+    # 构建消息：仅包含当前图片 + 历史文本（不含历史图片 Base64）
+    user_content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{state['key_frame']}"}}]
+    
+    if state.get("visual_summary"):
+        user_content.append({"type": "text", "text": f"[之前的画面] {state['visual_summary']}"})
+    
+    user_content.append({"type": "text", "text": state["asr_text"]})
+    
+    messages = [{"role": "system", "content": "你是 Vision Talk 助手…"}]
+    # 历史消息只包含纯文本，不包含图片
+    messages.extend(state["messages"])
+    messages.append({"role": "user", "content": user_content})
+    
+    response = await chat(messages=messages, stream=True)
+    full_text = ""
+    async for chunk in response:
+        full_text += chunk
+    
+    # 生成视觉摘要替代原始图片
+    summary = await summarize_visual(state["key_frame"], full_text)
+    
+    return {
+        "vlm_response": full_text,
+        "visual_summary": summary,
+        "key_frame": None,  # 清除本轮图片，防止后续轮次携带
+        "messages": state["messages"] + [
+            {"role": "user", "content": f"[用户展示了]{summary}\n{state['asr_text']}"},
+            {"role": "assistant", "content": full_text}
+        ]
+    }
+```
+
+**设计意图：**
+
+```
+第 1 轮：     [图片₁ Base64] + "这是什么？"           → Token: ~800
+第 2 轮：     "上轮画面是一块开发板，红灯闪烁" + [图片₂] + "怎么修？" → Token: ~600
+第 3 轮：     "上轮是示波器显示波形" + [图片₃] + "正常吗？"        → Token: ~600
+
+不做降维的话：
+第 3 轮：     [图片₁] [图片₂] [图片₃] + 文本              → Token: ~2000+
+```
+
+单张 1080p 图片约 500-800 token，降维后每轮视觉成本恒定控制在 ~600 token，多轮对话成本线性而非指数增长。
+
+**验证：** 3 轮对话后，每次 API 请求仅包含 1 张图片，历史记录为纯文本摘要。
+
+---
+
 ## PR 验证 Checklist
 
 - [ ] LiteLLM 调用 DeepSeek 成功
@@ -174,3 +255,5 @@ async def tts_node(state: ConversationState) -> dict:
 - [ ] TTS 节点合成可听语音
 - [ ] WebSocket 流式推送音频 chunk 正常
 - [ ] Checkpoint 恢复：模拟断线后状态可恢复
+- [ ] 多轮对话后 API 请求仅含 1 张图片（Token 压缩生效）
+- [ ] 视觉摘要正确概括历史画面内容

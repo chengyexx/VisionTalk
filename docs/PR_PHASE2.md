@@ -33,27 +33,34 @@ export const Camera: React.FC<CameraProps> = ({ onFrame, ... }) => {
 
 ---
 
-## Commit 2: 定时间隔抓帧
+## Commit 2: 事件驱动按需抓帧
 
 **变更：**
-- Camera 组件内实现 `setInterval` 定时抓帧
-- 每 2 秒通过 `getScreenshot()` 获取 Base64 JPEG
-- 通过 `onFrame` 回调抛出帧数据
+- Camera 组件改为「视觉休眠」模式：**不主动定时抓帧**
+- 暴露 `captureFrame()` 方法，仅在外部事件（VAD 触发）时被调用
+- 帧数据写入 `RingBuffer` 缓存，不直接发送
 
 **文件：**
-- `frontend/src/components/Camera.tsx` — 添加抓帧逻辑
+- `frontend/src/components/Camera.tsx` — 按需抓帧接口
 
 ```tsx
-useEffect(() => {
-  const timer = setInterval(() => {
-    const screenshot = webcamRef.current?.getScreenshot();
-    if (screenshot) onFrame?.(screenshot);
-  }, 2000); // 每 2 秒一帧
-  return () => clearInterval(timer);
-}, [onFrame]);
+// Camera.tsx — 暴露命令式抓帧方法
+const Camera = forwardRef((props, ref) => {
+  const webcamRef = useRef<Webcam>(null);
+  
+  useImperativeHandle(ref, () => ({
+    captureFrame: (): string | null => {
+      return webcamRef.current?.getScreenshot() ?? null;
+    }
+  }));
+  
+  return <Webcam ref={webcamRef} audio={false} ... />;
+});
 ```
 
-**验证：** 控制台每隔 2 秒输出 Base64 字符串。
+**设计意图：** 系统平时处于「视觉休眠」状态，零 CPU / 零网络开销。仅在 VAD 检测到用户说话时才抓一帧，将视觉成本从流式计算降为事件式计算。
+
+**验证：** Camera 画面正常显示，`captureFrame()` 调用返回 Base64 字符串。
 
 ---
 
@@ -103,13 +110,13 @@ class RingBuffer<T> {
 
 ---
 
-## Commit 5: 帧差分关键帧检测
+## Commit 5: VAD + 帧差分联合触发
 
 **变更：**
-- 新建 `frontend/src/utils/frameDiff.ts`
-- 实现像素级帧差分算法：对比相邻两帧像素差异比例
-- 差异超过阈值（如 5%）→ 标记为关键帧 → 才发送
-- 集成到 Camera → RingBuffer → WebSocket 链路上
+- 新建 `frontend/src/utils/frameDiff.ts`，实现像素级帧差分算法
+- 差异超过阈值（如 5%）→ 标记为关键帧
+- **与 VAD 联合决策**：「用户正在说话」且「画面有显著变化」两个条件同时满足，才发送当前帧
+- 集成到 Camera → RingBuffer → 联合触发 → WebSocket 链路
 
 **文件：**
 - `frontend/src/utils/frameDiff.ts`
@@ -119,9 +126,20 @@ class RingBuffer<T> {
 function isKeyFrame(prev: ImageData, curr: ImageData, threshold = 0.05): boolean {
   // 像素级对比，差异像素比例 > threshold 则返回 true
 }
+
+// 联合触发逻辑
+async function shouldSendFrame(
+  latestFrame: string, 
+  lastSentFrame: string | null, 
+  isSpeaking: boolean
+): Promise<boolean> {
+  if (!isSpeaking) return false;                    // VAD 触发为前提
+  if (!lastSentFrame) return true;                   // 首次必发
+  return isKeyFrame(lastSentFrame, latestFrame);     // 画面有变化才发
+}
 ```
 
-**验证：** 静止画面不发送，挥手/移动触发发送。
+**验证：** 不说话时不发送；说话但画面未变不发送；说话 + 画面变化才发送。
 
 ---
 
@@ -151,10 +169,10 @@ function useVAD(onSpeechStart: () => void, onSpeechEnd: () => void) {
 ## PR 验证 Checklist
 
 - [ ] Camera 正常打开，显示实时画面
-- [ ] 每 2 秒抓一帧 Base64
+- [ ] `captureFrame()` 按需返回 Base64，无定时器运行
 - [ ] WebSocket 连通，帧数据送达后端
 - [ ] RingBuffer 正确覆盖旧帧
-- [ ] 静止画面不触发关键帧发送
-- [ ] 挥手/移动触发关键帧发送
-- [ ] 不说话无任何数据上传
-- [ ] 开始说话立即触发关键帧 + 音频采集
+- [ ] 不说话时不发送任何帧数据（视觉休眠）
+- [ ] 说话 + 画面变化 → 发送关键帧
+- [ ] 说话但画面未变 → 不发送（节省 token）
+- [ ] VAD 检测到人声时触发帧采集 + 音频上传
