@@ -11,6 +11,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from app.services.asr import asr_node
 from app.services.vlm import vlm_node
+from app.services.tts import tts_node
 
 
 class ConversationState(TypedDict):
@@ -31,12 +32,6 @@ class ConversationState(TypedDict):
 
     # Control
     interrupted: bool           # True if user barge-in detected
-
-
-def tts_node(state: ConversationState) -> dict:
-    """Placeholder: synthesize speech from text."""
-    # TODO: PR3-5 — integrate TTS service
-    return {"tts_audio": b""}
 
 
 def build_graph() -> StateGraph:
