@@ -36,6 +36,24 @@
   font-size: 13px;
   color: #999;
   margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.ws-status {
+  margin-left: 4px;
+}
+
+.ws-connected { color: #22c55e; }
+.ws-connecting { color: #eab308; }
+.ws-disconnected { color: #ef4444; }
+
+.ack-msg {
+  font-size: 13px;
+  color: #22c55e;
+  margin: 0;
 }
 
 .controls {

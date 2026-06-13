@@ -18,18 +18,27 @@ async def websocket_endpoint(ws: WebSocket):
 
     try:
         while True:
-            # Receive JSON message from client
             data = await ws.receive_text()
             message = json.loads(data)
 
             msg_type = message.get("type", "unknown")
-            logger.info(f"Received message type: {msg_type}")
 
-            # Echo back for now - will be replaced with LangGraph pipeline
-            await ws.send_json({
-                "type": "ack",
-                "received": msg_type,
-            })
+            if msg_type == "frame":
+                frame_data = message.get("data", "")
+                frame_size = len(frame_data)
+                logger.info(f"[Frame] Received: {frame_size:,} bytes")
+
+                await ws.send_json({
+                    "type": "frame_ack",
+                    "size": frame_size,
+                    "message": f"Frame received ({frame_size:,} bytes)",
+                })
+            else:
+                logger.info(f"[WS] Unknown message type: {msg_type}")
+                await ws.send_json({
+                    "type": "ack",
+                    "received": msg_type,
+                })
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
