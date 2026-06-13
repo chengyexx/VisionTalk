@@ -1,27 +1,65 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 
-export type WSStatus = "connecting" | "connected" | "disconnected";
+export type WSStatus = "connecting" | "connected" | "disconnected" | "reconnecting";
 
 interface UseWebSocketOptions {
   url: string;
   onMessage?: (data: unknown) => void;
+  reconnect?: boolean;
 }
 
-export function useWebSocket({ url, onMessage }: UseWebSocketOptions) {
+const MAX_RETRIES = 5;
+const BASE_DELAY = 1000; // 1s
+const MAX_DELAY = 30000; // 30s
+
+export function useWebSocket({ url, onMessage, reconnect = true }: UseWebSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null);
+  const retryCountRef = useRef(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const intentionalCloseRef = useRef(false);
   const [status, setStatus] = useState<WSStatus>("disconnected");
+  const [retryIn, setRetryIn] = useState(0);
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
 
+  const clearRetry = useCallback(() => {
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleReconnect = useCallback(() => {
+    if (!reconnect) return;
+    if (retryCountRef.current >= MAX_RETRIES) {
+      setStatus("disconnected");
+      setRetryIn(0);
+      return;
+    }
+
+    const delay = Math.min(BASE_DELAY * Math.pow(2, retryCountRef.current), MAX_DELAY);
+    retryCountRef.current += 1;
+    setStatus("reconnecting");
+    setRetryIn(Math.ceil(delay / 1000));
+
+    retryTimerRef.current = setTimeout(() => {
+      setRetryIn(0);
+      connect();
+    }, delay);
+  }, [reconnect]);
+
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    if (wsRef.current?.readyState === WebSocket.CONNECTING) return;
 
     setStatus("connecting");
     const ws = new WebSocket(url);
 
     ws.onopen = () => {
       console.log("[WS] Connected");
+      retryCountRef.current = 0;
       setStatus("connected");
+      setRetryIn(0);
     };
 
     ws.onmessage = (event) => {
@@ -35,21 +73,29 @@ export function useWebSocket({ url, onMessage }: UseWebSocketOptions) {
 
     ws.onclose = () => {
       console.log("[WS] Disconnected");
-      setStatus("disconnected");
+      wsRef.current = null;
+      if (!intentionalCloseRef.current) {
+        scheduleReconnect();
+      } else {
+        setStatus("disconnected");
+      }
     };
 
-    ws.onerror = (err) => {
-      console.error("[WS] Error:", err);
+    ws.onerror = () => {
+      // onclose will fire after this, triggering reconnect
     };
 
     wsRef.current = ws;
-  }, [url]);
+  }, [url, scheduleReconnect]);
 
   const disconnect = useCallback(() => {
+    intentionalCloseRef.current = true;
+    clearRetry();
     wsRef.current?.close();
     wsRef.current = null;
     setStatus("disconnected");
-  }, []);
+    setRetryIn(0);
+  }, [clearRetry]);
 
   const send = useCallback((data: unknown) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -62,9 +108,11 @@ export function useWebSocket({ url, onMessage }: UseWebSocketOptions) {
   useEffect(() => {
     connect();
     return () => {
+      intentionalCloseRef.current = true;
+      clearRetry();
       wsRef.current?.close();
     };
-  }, [connect]);
+  }, [connect, clearRetry]);
 
-  return { status, send, connect, disconnect };
+  return { status, retryIn, send, connect, disconnect };
 }

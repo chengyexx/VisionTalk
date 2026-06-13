@@ -61,7 +61,7 @@ function App() {
     }
   }, []);
 
-  const { status: wsStatus, send } = useWebSocket({ url: WS_URL, onMessage: handleMessage });
+  const { status: wsStatus, retryIn, send } = useWebSocket({ url: WS_URL, onMessage: handleMessage });
   const { shouldSend } = useKeyFrameDetector();
   const audioCapture = useAudioCapture();
   const isRecordingRef = useRef(false);
@@ -119,7 +119,7 @@ function App() {
 
   return (
     <div className="app">
-      <StatusBar wsStatus={wsStatus} vadState={vadState} isSpeaking={isSpeaking} frameCount={frameCount} />
+      <StatusBar wsStatus={wsStatus} vadState={vadState} isSpeaking={isSpeaking} frameCount={frameCount} retryIn={retryIn} />
 
       <main className="app-main">
         <div className="camera-panel">

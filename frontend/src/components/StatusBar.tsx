@@ -7,15 +7,17 @@ interface StatusBarProps {
   vadState: VADState;
   isSpeaking: boolean;
   frameCount?: number;
+  retryIn?: number;
 }
 
 const statusLabels: Record<WSStatus, string> = {
   connected: "已连接",
   connecting: "连接中",
   disconnected: "未连接",
+  reconnecting: "重连中",
 };
 
-export function StatusBar({ wsStatus, vadState, isSpeaking, frameCount }: StatusBarProps) {
+export function StatusBar({ wsStatus, vadState, isSpeaking, frameCount, retryIn }: StatusBarProps) {
   return (
     <motion.div
       className="status-bar"
@@ -25,7 +27,11 @@ export function StatusBar({ wsStatus, vadState, isSpeaking, frameCount }: Status
     >
       <div className={`status-item ws-${wsStatus}`}>
         <span className="status-dot" />
-        <span className="status-text">{statusLabels[wsStatus]}</span>
+        <span className="status-text">
+          {wsStatus === "reconnecting" && retryIn
+            ? `${statusLabels[wsStatus]} (${retryIn}s)`
+            : statusLabels[wsStatus]}
+        </span>
       </div>
 
       <div className={`status-item vad-${vadState}`}>
