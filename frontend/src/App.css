@@ -56,6 +56,12 @@
   margin: 0;
 }
 
+.diff-msg {
+  font-size: 13px;
+  color: #93c5fd;
+  margin: 0;
+}
+
 .controls {
   display: flex;
   flex-direction: column;

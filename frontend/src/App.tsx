@@ -2,6 +2,7 @@ import { useRef, useState, useCallback } from "react";
 import Camera from "./components/Camera";
 import type { CameraHandle } from "./components/Camera";
 import { useWebSocket } from "./hooks/useWebSocket";
+import { useKeyFrameDetector } from "./hooks/useKeyFrameDetector";
 import "./App.css";
 
 const WS_URL = "ws://localhost:8000/ws";
@@ -10,6 +11,7 @@ function App() {
   const cameraRef = useRef<CameraHandle>(null);
   const [lastCapture, setLastCapture] = useState<string | null>(null);
   const [lastAck, setLastAck] = useState<string>("");
+  const [diffReason, setDiffReason] = useState<string>("");
 
   const handleMessage = useCallback((data: unknown) => {
     const msg = data as Record<string, unknown>;
@@ -23,7 +25,9 @@ function App() {
     onMessage: handleMessage,
   });
 
-  const handleCapture = () => {
+  const { shouldSend } = useKeyFrameDetector();
+
+  const handleCapture = async () => {
     const frame = cameraRef.current?.captureFrame();
     if (!frame) {
       console.warn("[Vision Talk] Capture failed: no frame");
@@ -31,6 +35,16 @@ function App() {
     }
 
     setLastCapture(frame);
+
+    // VAD stubbed: button click = VAD trigger, isSpeaking = true
+    const result = await shouldSend(frame, true);
+
+    if (!result.shouldSend) {
+      setDiffReason(`⏭️ 跳过: ${result.reason}`);
+      return;
+    }
+
+    setDiffReason(`📸 发送: ${result.reason}`);
 
     if (status === "connected") {
       send({ type: "frame", data: frame });
@@ -59,8 +73,9 @@ function App() {
 
         <div className="controls">
           <button onClick={handleCapture} className="capture-btn">
-            抓帧并发送
+            抓帧并发送（VAD + 帧差分联合）
           </button>
+          {diffReason && <p className="diff-msg">{diffReason}</p>}
           {lastAck && <p className="ack-msg">{lastAck}</p>}
           {lastCapture && (
             <img src={lastCapture} alt="Last capture" className="last-capture" width={160} />
