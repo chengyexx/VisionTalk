@@ -6,8 +6,8 @@
   padding: 0;
 }
 
-body {
+html, body, #root {
   min-height: 100vh;
-  background: #f8f9fa;
-  color: #333;
+  background: #08080d;
+  color: rgba(255, 255, 255, 0.9);
 }

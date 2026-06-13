@@ -1,6 +1,9 @@
 import { useRef, useState, useCallback } from "react";
 import Camera from "./components/Camera";
 import type { CameraHandle } from "./components/Camera";
+import { StatusBar } from "./components/StatusBar";
+import { ChatPanel } from "./components/ChatPanel";
+import { AudioPlayer } from "./components/AudioPlayer";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useKeyFrameDetector } from "./hooks/useKeyFrameDetector";
 import { useVAD } from "./hooks/useVAD";
@@ -8,93 +11,84 @@ import "./App.css";
 
 const WS_URL = "ws://localhost:8000/ws";
 
+interface Message {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  timestamp: number;
+}
+
+let msgId = 0;
+function newMsg(role: Message["role"], content: string): Message {
+  return { id: String(++msgId), role, content, timestamp: Date.now() };
+}
+
 function App() {
   const cameraRef = useRef<CameraHandle>(null);
-  const [lastCapture, setLastCapture] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [lastAck, setLastAck] = useState<string>("");
   const [diffReason, setDiffReason] = useState<string>("");
+  const [frameCount, setFrameCount] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
 
   const handleMessage = useCallback((data: unknown) => {
     const msg = data as Record<string, unknown>;
     if (msg.type === "frame_ack") {
-      setLastAck(`✅ ${msg.message} (${(msg.size as number)?.toLocaleString()} bytes)`);
+      setLastAck(`帧已接收 (${(msg.size as number)?.toLocaleString()} bytes)`);
+    }
+    if (msg.type === "tts_audio") {
+      setIsPlaying(true);
     }
   }, []);
 
-  const { status, send } = useWebSocket({
-    url: WS_URL,
-    onMessage: handleMessage,
-  });
-
+  const { status: wsStatus, send } = useWebSocket({ url: WS_URL, onMessage: handleMessage });
   const { shouldSend } = useKeyFrameDetector();
 
-  /** Send current camera frame if it passes VAD + frame diff check. */
   const trySendFrame = useCallback(async () => {
     const frame = cameraRef.current?.captureFrame();
-    if (!frame) {
-      console.warn("[Vision Talk] Capture failed: no frame");
-      return;
-    }
-
-    setLastCapture(frame);
+    if (!frame) return;
 
     const result = await shouldSend(frame, true);
-
     if (!result.shouldSend) {
-      setDiffReason(`⏭️ 跳过: ${result.reason}`);
+      setDiffReason(result.reason);
       return;
     }
 
-    setDiffReason(`📸 发送: ${result.reason}`);
-
-    if (status === "connected") {
+    setDiffReason(result.reason);
+    setFrameCount((c) => c + 1);
+    if (wsStatus === "connected") {
       send({ type: "frame", data: frame });
-    } else {
-      setLastAck("⚠️ WebSocket 未连接");
     }
-  }, [shouldSend, status, send]);
+  }, [shouldSend, wsStatus, send]);
 
-  // VAD triggers frame capture on speech start
   const { isSpeaking, vadState } = useVAD({
     onSpeechStart: () => {
-      console.log("[VAD] Speech started");
+      setMessages((prev) => [...prev, newMsg("system", "检测到语音...")]);
       trySendFrame();
     },
-    onSpeechEnd: () => {
-      console.log("[VAD] Speech ended");
-    },
+    onSpeechEnd: () => {},
   });
 
   return (
     <div className="app">
-      <header className="app-header">
-        <h1>Vision Talk</h1>
-        <p>AI 视觉对话助手</p>
-      </header>
+      <StatusBar wsStatus={wsStatus} vadState={vadState} isSpeaking={isSpeaking} frameCount={frameCount} />
 
       <main className="app-main">
-        <div className="camera-section">
+        <div className="camera-panel">
           <Camera ref={cameraRef} width={640} height={480} mirrored />
-          <p className="capture-hint">
-            {isSpeaking ? "🔊 检测到语音，正在采集" : "视觉休眠中 — VAD 监听中"}
-            <span className={`ws-status ws-${status}`}>
-              {status === "connected" ? "🟢" : status === "connecting" ? "🟡" : "🔴"}
-            </span>
-            <span className={`vad-status vad-${vadState}`}>
-              {vadState === "listening" ? "🎤" : vadState === "loading" ? "⏳" : "❌"}
-            </span>
-          </p>
+          <div className="camera-overlay">
+            {diffReason && <span className="overlay-badge">{diffReason}</span>}
+            {lastAck && <span className="overlay-badge ack">{lastAck}</span>}
+          </div>
         </div>
 
-        <div className="controls">
+        <div className="chat-panel-container">
+          <ChatPanel messages={messages} />
+          <AudioPlayer isPlaying={isPlaying} onEnded={() => setIsPlaying(false)} />
+
           <button onClick={trySendFrame} className="capture-btn">
-            手动抓帧发送
+            手动发送帧
           </button>
-          {diffReason && <p className="diff-msg">{diffReason}</p>}
-          {lastAck && <p className="ack-msg">{lastAck}</p>}
-          {lastCapture && (
-            <img src={lastCapture} alt="Last capture" className="last-capture" width={160} />
-          )}
         </div>
       </main>
     </div>

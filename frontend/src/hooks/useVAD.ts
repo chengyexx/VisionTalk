@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 
-type VADState = "loading" | "listening" | "error";
+export type VADState = "loading" | "listening" | "error";
 
 interface UseVADOptions {
   onSpeechStart?: () => void;
