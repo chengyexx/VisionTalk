@@ -15,7 +15,7 @@ const WS_URL = "ws://localhost:8000/ws";
 
 interface Message {
   id: string;
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "assistant-streaming" | "system";
   content: string;
   timestamp: number;
 }
@@ -35,6 +35,7 @@ function App() {
   const [audioUrl, setAudioUrl] = useState<string>("");
   const [currentModel, setCurrentModel] = useState("deepseek/deepseek-chat");
   const isAiSpeakingRef = useRef(false);
+  const pendingMsgRef = useRef("");
 
   // Handle incoming WS messages from LangGraph pipeline
   const handleMessage = useCallback((data: unknown) => {
@@ -42,12 +43,28 @@ function App() {
     switch (msg.type) {
       case "pipeline_start":
         isAiSpeakingRef.current = true;
+        pendingMsgRef.current = "";
         setMessages((prev) => [...prev, newMsg("system", "AI 处理中...")]);
         break;
+      case "vlm_token": {
+        const token = msg.text as string;
+        pendingMsgRef.current += token;
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.role === "assistant-streaming") {
+            const copy = [...prev];
+            copy[copy.length - 1] = { ...last, content: pendingMsgRef.current, timestamp: Date.now() };
+            return copy;
+          }
+          return [...prev, { id: String(++msgId), role: "assistant-streaming" as const, content: token, timestamp: Date.now() }];
+        });
+        break;
+      }
       case "asr_text":
         setMessages((prev) => [...prev, newMsg("user", msg.text as string)]);
         break;
       case "vlm_text":
+        pendingMsgRef.current = msg.text as string;
         setMessages((prev) => [...prev, newMsg("assistant", msg.text as string)]);
         break;
       case "tts_audio": {

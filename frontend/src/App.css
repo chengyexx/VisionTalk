@@ -179,6 +179,14 @@ body {
   color: var(--text-secondary);
   padding: 4px 10px;
 }
+.message.streaming .cursor-blink {
+  color: var(--accent);
+  animation: blink 0.7s step-end infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
 
 .message-time {
   font-size: 10px;

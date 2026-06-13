@@ -50,11 +50,14 @@ async def summarize_visual(vlm_response: str) -> str:
         return ""
 
 
-async def vlm_node(state: dict) -> dict:
+async def vlm_node(state: dict, on_token=None) -> dict:
     """
     LangGraph node: visual understanding + response generation.
     Reads state["key_frame"] and state["asr_text"],
     writes state["vlm_response"].
+
+    Args:
+        on_token: Optional async callback(str) for real-time streaming to client.
     """
     key_frame = state.get("key_frame", "")
     asr_text = state.get("asr_text", "")
@@ -104,7 +107,7 @@ async def vlm_node(state: dict) -> dict:
     if key_frame:
         logger.info(f"VLM: frame included ({len(key_frame):,} chars base64)")
 
-    # Stream response
+    # Stream response — push tokens to client in real-time
     full_text = ""
     try:
         stream = await chat(
@@ -117,7 +120,8 @@ async def vlm_node(state: dict) -> dict:
 
         async for chunk in stream:
             full_text += chunk
-            # TODO: PR3-5 — push chunks to TTS in real-time
+            if on_token:
+                await on_token(chunk)  # Push to WebSocket immediately
 
     except Exception as e:
         logger.error(f"VLM call failed: {e}")

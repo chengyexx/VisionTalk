@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "motion/react";
 
 interface Message {
   id: string;
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "assistant-streaming" | "system";
   content: string;
   timestamp: number;
 }
@@ -19,16 +19,20 @@ function formatTime(ts: number): string {
 function MessageBubble({ msg }: { msg: Message }) {
   const isUser = msg.role === "user";
   const isSystem = msg.role === "system";
+  const isStreaming = msg.role === "assistant-streaming";
 
   return (
     <motion.div
-      className={`message ${isUser ? "user" : isSystem ? "system" : "assistant"}`}
+      className={`message ${isUser ? "user" : isSystem ? "system" : isStreaming ? "assistant streaming" : "assistant"}`}
       initial={{ opacity: 0, x: isUser ? 20 : -20, scale: 0.96 }}
       animate={{ opacity: 1, x: 0, scale: 1 }}
       transition={{ type: "spring", stiffness: 300, damping: 24 }}
     >
-      <div className="message-content">{msg.content}</div>
-      <div className="message-time">{formatTime(msg.timestamp)}</div>
+      <div className="message-content">
+        {msg.content}
+        {isStreaming && <span className="cursor-blink">|</span>}
+      </div>
+      {!isStreaming && <div className="message-time">{formatTime(msg.timestamp)}</div>}
     </motion.div>
   );
 }

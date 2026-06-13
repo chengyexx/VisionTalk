@@ -6,7 +6,9 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.services.graph import graph, ConversationState
+from app.services.asr import transcribe
+from app.services.vlm import vlm_node as run_vlm
+from app.services.tts import synthesize_stream
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["websocket"])
@@ -16,13 +18,11 @@ _pipeline_interrupted = False
 
 
 async def run_pipeline(ws: WebSocket, audio_bytes: bytes, frame_base64: str):
-    """Run the full ASR → VLM → TTS pipeline. Checks for interrupt between nodes."""
+    """Run the full ASR → VLM → TTS pipeline with real-time streaming output."""
     global _pipeline_interrupted
     _pipeline_interrupted = False
 
-    config = {"configurable": {"thread_id": "vision-talk-session"}}
-
-    initial_state: ConversationState = {
+    state: dict = {
         "audio_chunk": audio_bytes,
         "key_frame": frame_base64,
         "asr_text": "",
@@ -34,35 +34,45 @@ async def run_pipeline(ws: WebSocket, audio_bytes: bytes, frame_base64: str):
     }
 
     try:
-        async for event in graph.astream(initial_state, config):
+        # === ASR (non-streaming, typically fast) ===
+        if _pipeline_interrupted:
+            return
+        text = await transcribe(audio_bytes)
+        state["asr_text"] = text
+        await ws.send_json({"type": "asr_text", "text": text})
+        logger.info(f"[Pipeline] ASR: {text[:50]}...")
+
+        if not text:
+            await ws.send_json({"type": "error", "message": "No speech detected"})
+            return
+
+        # === VLM (streaming — push tokens in real time) ===
+        if _pipeline_interrupted:
+            return
+
+        async def on_token(token: str):
+            await ws.send_json({"type": "vlm_token", "text": token})
+
+        state = await run_vlm(state, on_token=on_token)
+        vlm_text = state.get("vlm_response", "")
+
+        if not vlm_text:
+            await ws.send_json({"type": "error", "message": "No VLM response"})
+            return
+
+        # === TTS (streaming — push audio chunks as they're synthesized) ===
+        if _pipeline_interrupted:
+            return
+
+        async for audio_chunk in synthesize_stream(vlm_text):
             if _pipeline_interrupted:
-                logger.info("[Pipeline] Interrupted by user")
-                await ws.send_json({"type": "interrupt_ack"})
-                return
-
-            for node_name, node_output in event.items():
-                if _pipeline_interrupted:
-                    break
-
-                if node_name == "asr":
-                    text = node_output.get("asr_text", "")
-                    if text:
-                        await ws.send_json({"type": "asr_text", "text": text})
-
-                elif node_name == "vlm":
-                    text = node_output.get("vlm_response", "")
-                    if text:
-                        await ws.send_json({"type": "vlm_text", "text": text})
-
-                elif node_name == "tts":
-                    audio = node_output.get("tts_audio", b"")
-                    if audio:
-                        audio_b64 = base64.b64encode(audio).decode("utf-8")
-                        await ws.send_json({
-                            "type": "tts_audio",
-                            "data": audio_b64,
-                            "format": "mp3",
-                        })
+                break
+            audio_b64 = base64.b64encode(audio_chunk).decode("utf-8")
+            await ws.send_json({
+                "type": "tts_audio",
+                "data": audio_b64,
+                "format": "mp3",
+            })
 
     except Exception as e:
         if not _pipeline_interrupted:
