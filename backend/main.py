@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routes import health, websocket
+from app.routes import health, websocket, model
 
 app = FastAPI(title="Vision Talk API", version="0.1.0")
 
@@ -19,6 +19,7 @@ app.add_middleware(
 # Register routes
 app.include_router(health.router)
 app.include_router(websocket.router)
+app.include_router(model.router)
 
 
 if __name__ == "__main__":

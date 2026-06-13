@@ -4,6 +4,7 @@ import type { CameraHandle } from "./components/Camera";
 import { StatusBar } from "./components/StatusBar";
 import { ChatPanel } from "./components/ChatPanel";
 import { AudioPlayer } from "./components/AudioPlayer";
+import { ModelSelector } from "./components/ModelSelector";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useKeyFrameDetector } from "./hooks/useKeyFrameDetector";
 import { useVAD } from "./hooks/useVAD";
@@ -32,7 +33,8 @@ function App() {
   const [frameCount, setFrameCount] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string>("");
-  const isAiSpeakingRef = useRef(false); // Track if AI is currently responding
+  const [currentModel, setCurrentModel] = useState("deepseek/deepseek-chat");
+  const isAiSpeakingRef = useRef(false);
 
   // Handle incoming WS messages from LangGraph pipeline
   const handleMessage = useCallback((data: unknown) => {
@@ -147,9 +149,24 @@ function App() {
     onSpeechEnd: handleSpeechEnd,
   });
 
+  const handleModelChange = useCallback(async (modelId: string) => {
+    setCurrentModel(modelId);
+    try {
+      await fetch("http://localhost:8000/api/model/switch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: modelId }),
+      });
+      setMessages((prev) => [...prev, newMsg("system", `模型切换至: ${modelId}`)]);
+    } catch {
+      setMessages((prev) => [...prev, newMsg("system", "模型切换失败")]);
+    }
+  }, []);
+
   return (
     <div className="app">
       <StatusBar wsStatus={wsStatus} vadState={vadState} isSpeaking={isSpeaking} frameCount={frameCount} retryIn={retryIn} />
+      <ModelSelector currentModel={currentModel} onChange={handleModelChange} />
 
       <main className="app-main">
         <div className="camera-panel">
