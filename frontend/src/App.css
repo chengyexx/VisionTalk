@@ -62,6 +62,14 @@
   margin: 0;
 }
 
+.vad-status {
+  margin-left: 4px;
+}
+
+.vad-listening { color: #22c55e; }
+.vad-loading { color: #eab308; }
+.vad-error { color: #ef4444; }
+
 .controls {
   display: flex;
   flex-direction: column;

@@ -3,6 +3,7 @@ import Camera from "./components/Camera";
 import type { CameraHandle } from "./components/Camera";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useKeyFrameDetector } from "./hooks/useKeyFrameDetector";
+import { useVAD } from "./hooks/useVAD";
 import "./App.css";
 
 const WS_URL = "ws://localhost:8000/ws";
@@ -27,7 +28,8 @@ function App() {
 
   const { shouldSend } = useKeyFrameDetector();
 
-  const handleCapture = async () => {
+  /** Send current camera frame if it passes VAD + frame diff check. */
+  const trySendFrame = useCallback(async () => {
     const frame = cameraRef.current?.captureFrame();
     if (!frame) {
       console.warn("[Vision Talk] Capture failed: no frame");
@@ -36,7 +38,6 @@ function App() {
 
     setLastCapture(frame);
 
-    // VAD stubbed: button click = VAD trigger, isSpeaking = true
     const result = await shouldSend(frame, true);
 
     if (!result.shouldSend) {
@@ -51,7 +52,18 @@ function App() {
     } else {
       setLastAck("⚠️ WebSocket 未连接");
     }
-  };
+  }, [shouldSend, status, send]);
+
+  // VAD triggers frame capture on speech start
+  const { isSpeaking, vadState } = useVAD({
+    onSpeechStart: () => {
+      console.log("[VAD] Speech started");
+      trySendFrame();
+    },
+    onSpeechEnd: () => {
+      console.log("[VAD] Speech ended");
+    },
+  });
 
   return (
     <div className="app">
@@ -64,16 +76,19 @@ function App() {
         <div className="camera-section">
           <Camera ref={cameraRef} width={640} height={480} mirrored />
           <p className="capture-hint">
-            视觉休眠中 — 仅在事件触发时抓帧
+            {isSpeaking ? "🔊 检测到语音，正在采集" : "视觉休眠中 — VAD 监听中"}
             <span className={`ws-status ws-${status}`}>
               {status === "connected" ? "🟢" : status === "connecting" ? "🟡" : "🔴"}
+            </span>
+            <span className={`vad-status vad-${vadState}`}>
+              {vadState === "listening" ? "🎤" : vadState === "loading" ? "⏳" : "❌"}
             </span>
           </p>
         </div>
 
         <div className="controls">
-          <button onClick={handleCapture} className="capture-btn">
-            抓帧并发送（VAD + 帧差分联合）
+          <button onClick={trySendFrame} className="capture-btn">
+            手动抓帧发送
           </button>
           {diffReason && <p className="diff-msg">{diffReason}</p>}
           {lastAck && <p className="ack-msg">{lastAck}</p>}
