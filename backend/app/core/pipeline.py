@@ -24,7 +24,24 @@ from app.core.vlm import (
     summarize_visual,
     vlm_inference,
 )
-from app.core.tts import synthesize
+from app.core.tts import synthesize, split_sentences
+
+# ── 旁路推流回调 ────────────────────────────────────────────────
+# 模块级回调，由 PipelineExecutor.execute() 注入。
+# vlm_node 通过此回调将 token/audio 直接推送到 WebSocket，
+# 实现全双工: VLM 边生成边推送，不等整句结束。
+_ws_sender: Any = None
+
+
+def _set_ws_sender(sender: Any) -> None:
+    global _ws_sender
+    _ws_sender = sender
+
+
+async def _push(type_: str, **kwargs) -> None:
+    """推送消息到 WebSocket (如果已注入 sender)"""
+    if _ws_sender:
+        await _ws_sender({"type": type_, **kwargs})
 
 
 # ── 严格状态模型 ──────────────────────────────────────────────────
@@ -110,14 +127,38 @@ async def vlm_node(state: ConversationState) -> dict:
     full_messages.extend(history)           # 纯文本历史 (无历史图片 Base64)
     full_messages.append(user_msg)          # 当前轮多模态 user message
 
-    # ── 3. 流式推理 + 消化流 ──
+    # ── 3. 全双工旁路推流: token → 前端打字机, 整句 → TTS → 前端播放 ──
     full_response = ""
+    sentence_buffer = ""
+    SENTENCE_ENDS = {"。", "！", "？", ".", "!", "?"}
+
     try:
         async for token in vlm_inference(full_messages):
             full_response += token
-            # 预留: 未来通过 text_queue 推送 token 给前端
+            sentence_buffer += token
+
+            # 旁路 A: 每个 token 实时推给前端 (打字机效果)
+            await _push("vlm_token", text=token)
+
+            # 旁路 B: 遇到句子结束标点 → 立刻合成语音推送
+            if token in SENTENCE_ENDS:
+                sentence = sentence_buffer.strip()
+                if sentence:
+                    audio_bytes = await synthesize(sentence)
+                    if audio_bytes:
+                        chunk_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                        await _push("tts_chunk", audio_b64=chunk_b64)
+                sentence_buffer = ""
+
     except Exception as e:
         return {"error": f"VLM inference failed: {e}", "vlm_response": ""}
+
+    # 扫尾: 最后一句没有标点的残留文本
+    if sentence_buffer.strip():
+        audio_bytes = await synthesize(sentence_buffer.strip())
+        if audio_bytes:
+            chunk_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+            await _push("tts_chunk", audio_b64=chunk_b64)
 
     if not full_response:
         return {"vlm_response": "", "error": "VLM returned empty response"}
@@ -224,6 +265,7 @@ class PipelineExecutor:
         frame_b64: str = "",
         text_queue: asyncio.Queue | None = None,
         audio_queue: asyncio.Queue | None = None,
+        ws_sender: Any = None,
     ) -> ConversationState:
         """
         执行一轮完整对话管线 (ASR → VLM → TTS)。
@@ -231,8 +273,9 @@ class PipelineExecutor:
         Args:
             audio_b64:  Base64 用户语音 (必传)
             frame_b64:  Base64 摄像头关键帧 (可选)
-            text_queue: VLM token 流式推送队列 (可选)
-            audio_queue: TTS 音频流式推送队列 (可选)
+            text_queue: VLM token 流式推送队列 (已弃用，用 ws_sender)
+            audio_queue: TTS 音频流式推送队列 (已弃用，用 ws_sender)
+            ws_sender:  旁路推流回调 async fn(dict) — 用于全双工流式推送
 
         Returns:
             更新后的 ConversationState (含 asr_text/vlm_response/tts_audio)
@@ -240,13 +283,15 @@ class PipelineExecutor:
         Raises:
             ValueError: audio_b64 为空 (前置条件不满足)
         """
-        # ── 前置输入校验 (Pydantic 层面的强约束) ──
         if not audio_b64:
             raise ValueError("audio_b64 is required — pipeline cannot run without user speech")
 
         if self.is_interrupted():
             self.reset()
             return self.state
+
+        # 注入旁路推流回调
+        _set_ws_sender(ws_sender)
 
         # 注入本轮的输入到状态中
         self.state.audio_chunk = audio_b64
@@ -261,11 +306,10 @@ class PipelineExecutor:
         # ── 执行 LangGraph ──
         try:
             result = await self.graph.ainvoke(
-                self.state.model_dump(),  # Pydantic → dict
+                self.state.model_dump(),
                 config=self._config,
             )
 
-            # 将结果反序列化回 Pydantic 模型
             self.state = ConversationState(**result)
             return self.state
 
@@ -273,3 +317,6 @@ class PipelineExecutor:
             self.state.error = str(e)
             print(f"[Pipeline] Execution failed: {e}")
             return self.state
+
+        finally:
+            _set_ws_sender(None)  # 清理回调

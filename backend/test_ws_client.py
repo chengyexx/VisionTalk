@@ -27,14 +27,13 @@ FAKE_AUDIO_B64 = base64.b64encode(b"MOCK_WEBM_AUDIO_DATA").decode()
 
 
 async def test_full_turn():
-    """完整一轮对话: start_turn → 收到 turn_end"""
+    """完整一轮对话 + 验证全双工流式推送"""
     import websockets
 
     print(f"连接到 {WS_URL} ...")
     async with websockets.connect(WS_URL) as ws:
         print("已连接\n")
 
-        # 发送 start_turn
         payload = {
             "type": "start_turn",
             "audio_b64": FAKE_AUDIO_B64,
@@ -43,39 +42,47 @@ async def test_full_turn():
         await ws.send(json.dumps(payload))
         print(f"→ 发送 start_turn (audio={len(FAKE_AUDIO_B64)}c, image={len(FAKE_JPEG_B64)}c)")
 
-        # 接收响应
+        token_count = 0
+        audio_count = 0
+
         while True:
             raw = await ws.recv()
             msg = json.loads(raw)
             msg_type = msg.get("type", "?")
 
             if msg_type == "state_change":
-                state = msg.get("state", "?")
-                print(f"← state_change: {state}")
+                print(f"← state_change: {msg.get('state')}")
+
+            elif msg_type == "vlm_token":
+                token_count += 1
+                if token_count <= 3:  # 只打印前 3 个 token
+                    print(f"← vlm_token: '{msg.get('text', '')}'")
+
+            elif msg_type == "tts_chunk":
+                audio_count += 1
+                chunk_len = len(msg.get("audio_b64", ""))
+                print(f"← tts_chunk #{audio_count}: {chunk_len} chars")
 
             elif msg_type == "turn_end":
                 payload = msg.get("payload", {})
                 asr = payload.get("asr_text", "")[:50]
                 vlm = payload.get("vlm_response", "")[:60]
-                tts_len = len(payload.get("tts_audio_b64", ""))
                 error = payload.get("error", "")
 
                 if error:
                     print(f"← turn_end ERROR: {error}")
                 else:
-                    print(f"← turn_end:")
-                    print(f"     asr:  {asr}")
-                    print(f"     vlm:  {vlm}...")
-                    print(f"     tts:  {tts_len} chars Base64")
+                    print(f"← turn_end: asr={asr}, vlm={vlm}...")
 
             elif msg_type == "error":
                 print(f"← error: {msg.get('message', '?')}")
 
-            # 收到 idle 后退出 (表示本轮结束)
             if msg_type == "state_change" and msg.get("state") == "idle":
                 break
 
-    print("\n[PASS] 完整一轮对话通过")
+        assert token_count > 0, "Should have received at least 1 vlm_token"
+        assert audio_count > 0, "Should have received at least 1 tts_chunk"
+        print(f"\n[PASS] 全双工流式: {token_count} tokens + {audio_count} audio chunks")
 
 
 async def test_interrupt():

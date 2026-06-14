@@ -10,6 +10,11 @@ interface UseVADOptions {
 /**
  * Browser-side Voice Activity Detection using Silero VAD model.
  * Detects human speech in real-time from the microphone.
+ *
+ * Model files are served from public/models/:
+ *   - silero_vad_v5.onnx     (ONNX model)
+ *   - vad.worklet.bundle.min.js (AudioWorklet)
+ *   - ort-wasm-*.wasm        (ONNX Runtime WASM)
  */
 export function useVAD({ onSpeechStart, onSpeechEnd }: UseVADOptions = {}) {
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -37,6 +42,11 @@ export function useVAD({ onSpeechStart, onSpeechEnd }: UseVADOptions = {}) {
         onVADMisfire: () => {
           // Brief noise detected, not sustained speech
         },
+        // v5 model is smaller and faster than legacy
+        model: "v5",
+        // Paths relative to page origin — served from public/models/
+        baseAssetPath: "/models/",
+        onnxWASMBasePath: "/models/",
       });
 
       vad.start();

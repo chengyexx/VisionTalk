@@ -1,9 +1,23 @@
+# Vision Talk — Backend Dependencies
+# Core Framework
 fastapi>=0.115.0
-uvicorn[standard]>=0.34.0
-websockets>=14.0
-python-multipart>=0.0.18
-litellm>=1.83.0
-openai>=2.20.0
+uvicorn[standard]>=0.30.0
+
+# LangGraph & LangChain
+langgraph>=0.2.0
+langchain-core>=0.3.0
+
+# Multi-model unified access
+litellm>=1.50.0
+
+# Environment & Config
 python-dotenv>=1.0.0
-langgraph>=1.2.0
-langchain-core>=1.4.0
+
+# Audio processing
+pydub>=0.25.0
+
+# Edge TTS (free streaming TTS)
+edge-tts>=6.1.0
+
+# Async support
+aiofiles>=24.0.0

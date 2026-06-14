@@ -52,6 +52,15 @@ async def websocket_endpoint(ws: WebSocket):
     executor = PipelineExecutor()
     current_task: asyncio.Task | None = None
 
+    # ── 旁路推流回调 ────────────────────────────────────────
+    # vlm_node 通过此回调将 token/audio 直接推送到 WebSocket。
+    # 需要包装 try/except 防止 WS 断开时崩溃。
+    async def _ws_sender(msg: dict) -> None:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            pass  # WS 已断开，静默丢弃
+
     # ── 管线执行协程 ────────────────────────────────────────
     async def _run_pipeline(audio_b64: str, image_b64: str) -> None:
         """在独立 Task 中执行管线，完成后推送结果。"""
@@ -63,9 +72,9 @@ async def websocket_endpoint(ws: WebSocket):
             result = await executor.execute(
                 audio_b64=audio_b64,
                 frame_b64=image_b64,
+                ws_sender=_ws_sender,   # 注入旁路推流回调
             )
 
-            # 检查是否被取消
             if current_task and current_task.cancelled():
                 return
 
@@ -76,7 +85,6 @@ async def websocket_endpoint(ws: WebSocket):
                 })
                 return
 
-            # 编码 TTS 音频为 Base64
             tts_b64 = ""
             if result.tts_audio:
                 tts_b64 = base64.b64encode(result.tts_audio).decode("utf-8")
@@ -94,13 +102,15 @@ async def websocket_endpoint(ws: WebSocket):
 
         except asyncio.CancelledError:
             logger.info("管线任务被取消 (interrupt)")
-            # 不推送任何消息 — interrupt 处理器已经发了 idle
-            raise
+            # 不推送 idle — interrupt handler 已处理
 
         except Exception as e:
             logger.exception("管线执行异常")
-            await ws.send_json({"type": "error", "message": str(e)})
-            await ws.send_json({"type": "state_change", "state": "idle"})
+            try:
+                await ws.send_json({"type": "error", "message": str(e)})
+                await ws.send_json({"type": "state_change", "state": "idle"})
+            except Exception:
+                pass
 
     # ── 消息循环 ────────────────────────────────────────────
     try:
