@@ -5,8 +5,8 @@ Vision Talk — 模型管理 API
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.core.llm import set_model, get_model_state, reset_models
-from app.config import config
+from ..core.llm import set_model, get_model_state, reset_models
+from ..config import config
 
 router = APIRouter(prefix="/api")
 

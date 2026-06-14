@@ -7,9 +7,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.health import router as health_router
-from app.api.websocket import router as ws_router
-from app.api.model import router as model_router
+from .api.health import router as health_router
+from .api.websocket import router as ws_router
+from .api.model import router as model_router
 
 logger = logging.getLogger("vision_talk.main")
 
@@ -17,13 +17,13 @@ logger = logging.getLogger("vision_talk.main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle: startup and shutdown hooks."""
-    from app.core.logging_config import setup_logging
+    from .core.logging_config import setup_logging
     setup_logging(level=logging.INFO)
 
     logger.info("Server starting...")
     logger.info("WebSocket endpoint: ws://localhost:8000/ws")
     logger.info("Model API:       http://localhost:8000/api/model/switch")
-    from app.core.llm import get_model_state
+    from .core.llm import get_model_state
     state = get_model_state()
     logger.info("Available models: VLM=%s, ASR=%s, TTS=%s",
                 state["vlm"], state["asr"], state["tts"])
@@ -60,7 +60,7 @@ app.include_router(model_router)
 @app.get("/")
 async def root():
     """Health check endpoint."""
-    from app.core.llm import get_model_state
+    from .core.llm import get_model_state
     return {
         "service": "Vision Talk",
         "status": "running",

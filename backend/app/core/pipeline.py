@@ -22,14 +22,14 @@ from pydantic import BaseModel, Field
 
 from langgraph.graph import StateGraph, END, START
 
-from app.core.asr import transcribe
-from app.core.vlm import (
+from .asr import transcribe
+from .vlm import (
     SYSTEM_PROMPT,
     assemble_multimodal_message,
     summarize_visual,
     vlm_inference,
 )
-from app.core.tts import synthesize, split_sentences
+from .tts import synthesize, split_sentences
 
 logger = logging.getLogger("vision_talk.pipeline")
 
@@ -106,16 +106,29 @@ def initial_state() -> ConversationState:
 # ── 节点 (Mock 骨架 — 后续步骤填充) ────────────────────────────
 
 async def asr_node(state: ConversationState) -> dict:
-    """语音识别: audio_chunk → asr_text。不操作 messages。"""
+    """语音识别: audio_chunk → asr_text。
+
+    防御原则: 无论识别成功/失败/静音，必须显式返回 asr_text 字段，
+    确保 LangGraph 用返回值覆盖 State 中的旧数据，杜绝跨轮泄漏。
+    """
     audio = state.audio_chunk
+    new_asr_text = ""
+    new_error = ""
+
     if not audio:
-        return {"error": "No audio data in state"}
+        new_error = "No audio data in state"
+        logger.warning("ASR: audio_chunk 为空")
+    else:
+        text = await transcribe(audio)
+        if not text:
+            new_error = "ASR returned empty (silence / error)"
+            logger.warning("ASR: 识别结果为空 (静音或失败)")
+        else:
+            new_asr_text = text
+            logger.info("ASR: 识别成功 → '%s'", text[:50])
 
-    text = await transcribe(audio)
-    if not text:
-        return {"asr_text": "", "error": "ASR returned empty (silence / error)"}
-
-    return {"asr_text": text, "error": ""}
+    # 显式返回两个字段 — 确保 LangGraph merge 时覆盖旧值
+    return {"asr_text": new_asr_text, "error": new_error}
 
 
 async def vlm_node(state: ConversationState) -> dict:
@@ -352,11 +365,19 @@ class PipelineExecutor:
         token = _set_ws_sender(ws_sender)
 
         # 注入本轮的输入到状态中
+        audio_fingerprint = audio_b64[:30] if audio_b64 else "(empty)"
+        logger.info(
+            "管线执行开始 — audio_fp=%s... audio_len=%d frame_len=%d",
+            audio_fingerprint,
+            len(audio_b64),
+            len(frame_b64 or ""),
+        )
+
         self.state.audio_chunk = audio_b64
         self.state.key_frame = frame_b64 or ""
         self.state.error = ""
 
-        # 清空中间产物 (上一轮的残留)
+        # 强制清空中间产物 — 防止上一轮残留泄漏到本次 invoke
         self.state.asr_text = ""
         self.state.vlm_response = ""
         self.state.tts_audio = b""

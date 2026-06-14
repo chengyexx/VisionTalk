@@ -14,24 +14,31 @@ Vision Talk — VLM 多模态推理
 import logging
 from typing import AsyncIterator
 
-from app.config import config
-from app.core.llm import chat, get_active_vlm_model
+from ..config import config
+from .llm import chat, get_active_vlm_model
 
 logger = logging.getLogger("vision_talk.vlm")
 
-SYSTEM_PROMPT = """你是 Vision Talk 助手，一个能够看到用户摄像头画面的 AI 对话伙伴。
+SYSTEM_PROMPT = """你是 Vision Talk 助手，一个通过摄像头实时观察用户周围环境的 AI 对话伙伴。
 
-你的能力:
-- 看到用户摄像头拍摄的实时画面，识别其中的物体、场景、人物
-- 听到用户的语音问题，结合画面内容做出自然、有帮助的回答
+核心原则 — 只说你看到的，不编造:
+
+1. 摄像头画面是你对世界的唯一感官。用户说的话是他们的问题，不是你看到的画面。
+   两者不是一回事。不要把用户描述的东西当成你"看到"的。
+2. 如果用户描述了一个你画面中没有的物体（比如"电路板"、"红灯"），
+   直接告诉用户你实际看到了什么（人脸、房间、桌面等），
+   然后请用户把那个物体对准摄像头。绝对不要假装你看到了它。
+3. 画面中有人的时候，你是对方的对话伙伴，不要机械地描述对方的外貌。
+
+视觉记忆规则:
+- 当你收到"[之前看到的]"信息时，这是一段历史摘要，可能会过时或与实际画面矛盾。
+- 当前摄像头画面永远比摘要更可信。如果摘要与当前画面矛盾，相信当前画面。
+- 如果摘要中描述的物体在当前画面中看不到，果断忽略摘要。
 
 对话规则:
 1. 用自然、友好的中文口语风格回答
 2. 回答简洁明了，控制在 2-4 句话
-3. 如果画面内容不清晰或有疑问，主动询问用户
-
-当你收到"[之前看到的]"信息时，这是对你之前看到的画面的文字总结，并非当前画面。
-当前画面永远是最新的帧数据。"""
+3. 直接回应用户的问题，不需要每句话都描述画面"""
 
 
 def assemble_multimodal_message(
@@ -40,45 +47,30 @@ def assemble_multimodal_message(
     visual_summary: str | None = None,
 ) -> dict:
     """
-    按 LiteLLM / OpenAI 多模态规范组装单条 user message。
-
-    结构:
-        {
-            "role": "user",
-            "content": [
-                {"type": "text",     "text": "[之前看到的]: ..."},   # 可选
-                {"type": "image_url", "image_url": {"url": "data:..."}}, # 可选
-                {"type": "text",     "text": "用户说的话"},            # 可选
-            ]
-        }
+    组装单条 user message (纯文本，不发送图片 Base64)。
 
     Args:
         asr_text:       用户语音识别文本
-        key_frame:      当前摄像头帧 Base64 JPEG
-        visual_summary: 历史画面文字摘要 (记忆压缩产物)
+        key_frame:      当前摄像头帧 (保留参数，但不注入 — 节省 Token)
+        visual_summary: 历史画面文字摘要
 
     Returns:
-        OpenAI-format 消息字典，content 为 multimodal list
+        OpenAI-format 消息字典，content 为纯文本
     """
     content: list[dict] = []
 
-    # 1. 视觉记忆摘要 (如果有) — 放在最前，给 VLM 上下文
+    # 1. 用户语音 — 放在最前，权重最高
+    if asr_text:
+        content.append({"type": "text", "text": asr_text})
+
+    # 2. 视觉摘要 (如果有)
     if visual_summary:
         content.append({
             "type": "text",
             "text": f"[之前看到的]: {visual_summary}",
         })
 
-    # 2. 当前关键帧 (如果有)
-    if key_frame:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{key_frame}"},
-        })
-
-    # 3. 用户语音文本 (如果有)
-    if asr_text:
-        content.append({"type": "text", "text": asr_text})
+    return {"role": "user", "content": content}
 
     return {"role": "user", "content": content}
 
@@ -134,9 +126,11 @@ async def summarize_visual(asr_text: str, vlm_response: str) -> str:
         return "用户没有展示画面"
 
     prompt = (
-        "根据以下对话，用一句话概括用户摄像头画面里有什么对象。"
-        "只回答画面内容，不要引入对话本身。\n\n"
-        f"用户: {asr_text}\nAI: {vlm_response}"
+        "只根据 AI 的回答内容，用一句话概括 AI 在摄像头画面中实际看到了什么对象。"
+        "注意: 用户说的话可能描述了画面中没有的物体（比如用户问'红灯是什么意思'但画面中根本没有红灯），"
+        "这种情况下只信 AI 回答中描述的物体，不要从用户话语中推断。"
+        "如果 AI 回答只提到了人脸/人/房间，就只说这些。不要无中生有。\n\n"
+        f"用户说的话: {asr_text}\nAI 实际看到的: {vlm_response}"
     )
 
     try:

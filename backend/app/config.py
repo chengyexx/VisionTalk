@@ -32,8 +32,9 @@ class Config:
     ]
 
     ASR_MODELS: list[str] = [
-        "sensevoice-v1",              # 阿里 SenseVoice (DashScope)
-        "whisper-1",                   # OpenAI Whisper (需 OpenAI Key)
+        "whisper-large-v3",             # Groq Whisper (推荐，免费额度)
+        "whisper-large-v3-turbo",        # Groq Whisper Turbo (更快)
+        "whisper-1",                     # OpenAI Whisper
     ]
 
     TTS_MODELS: list[str] = [

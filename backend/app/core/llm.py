@@ -8,7 +8,7 @@ vision message (image_url) 由 LiteLLM 自动转换为各厂商的原生多模�
 import asyncio
 from typing import Any
 from litellm import acompletion
-from app.config import config
+from ..config import config
 
 # ── 运行时模型覆盖 ─────────────────────────────────────────────────
 # 模块级全局变量，允许通过 API 在运行时切换模型。

@@ -28,12 +28,13 @@ Server → Client:
 """
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import time
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.core.pipeline import PipelineExecutor
+from ..core.pipeline import PipelineExecutor
 
 logger = logging.getLogger("vision_talk.ws")
 router = APIRouter()
@@ -125,11 +126,23 @@ async def websocket_endpoint(ws: WebSocket):
             # ── start_turn: 发起新一轮对话 ──
             if msg_type == "start_turn":
                 audio_b64_in = data.get("audio_b64", "")
+                image_b64_in = data.get("image_b64", "")
 
                 # 防御: 空音频 / 超短碎片直接丢弃，不给前端错误回显
                 if not audio_b64_in or len(audio_b64_in) < 100:
                     logger.debug("丢弃过短音频 (len=%d)", len(audio_b64_in or ""))
                     continue
+
+                # 音频指纹 — 对比前后端指纹确认传输一致性
+                audio_hash = hashlib.sha256(audio_b64_in.encode()).hexdigest()[:16]
+                logger.info(
+                    "WS start_turn — audio_len=%d audio_hash=%s audio_fp=%s... "
+                    "frame_len=%d",
+                    len(audio_b64_in),
+                    audio_hash,
+                    audio_b64_in[:30],
+                    len(image_b64_in),
+                )
 
                 # 强杀上一轮 — 但保护刚创建的任务（防止 VAD 高频触发连锁取消）
                 if current_task and not current_task.done():

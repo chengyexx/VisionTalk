@@ -37,6 +37,7 @@ function statusDotClass(s: WSStatus): string {
 
 export default function App() {
   const cameraRef = useRef<CameraHandle>(null);
+  const audioPlayingRef = useRef(false);
 
   // ── 对话层 ──
   const {
@@ -53,14 +54,24 @@ export default function App() {
     wsUrl: WS_URL,
   });
 
+  // 同步 audioPlaying 到 ref (避免 useTurnPipeline 回调重建)
+  audioPlayingRef.current = audioPlaying;
+
   // ── 管线层 ──
   const { isSpeaking, vadState, frameCount, diffReason } = useTurnPipeline({
     cameraRef,
     wsStatus,
     isAiSpeaking,
+    isAudioPlaying: () => audioPlayingRef.current,
     onBargeIn: interrupt,
     onSendTurn: useCallback(
       (audioB64: string, frameB64: string) => {
+        console.log(
+          "[SendTurn] audio_len=%d audio_fp=%s frame_len=%d",
+          audioB64.length,
+          audioB64.slice(0, 30),
+          frameB64.length,
+        );
         send({ type: "start_turn", audio_b64: audioB64, image_b64: frameB64 });
       },
       [send]

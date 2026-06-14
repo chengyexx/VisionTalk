@@ -15,7 +15,7 @@ from typing import AsyncIterator
 
 import edge_tts
 
-from app.config import config
+from ..config import config
 
 logger = logging.getLogger("vision_talk.tts")
 
