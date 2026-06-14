@@ -5,6 +5,7 @@ export type WSStatus = "connecting" | "connected" | "disconnected" | "reconnecti
 interface UseWebSocketOptions {
   url: string;
   onMessage?: (data: unknown) => void;
+  onStatusChange?: (status: WSStatus, retryIn: number) => void;
   reconnect?: boolean;
 }
 
@@ -12,7 +13,7 @@ const MAX_RETRIES = 5;
 const BASE_DELAY = 1000; // 1s
 const MAX_DELAY = 30000; // 30s
 
-export function useWebSocket({ url, onMessage, reconnect = true }: UseWebSocketOptions) {
+export function useWebSocket({ url, onMessage, onStatusChange, reconnect = true }: UseWebSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const retryCountRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -21,6 +22,8 @@ export function useWebSocket({ url, onMessage, reconnect = true }: UseWebSocketO
   const [retryIn, setRetryIn] = useState(0);
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
+  const onStatusChangeRef = useRef(onStatusChange);
+  onStatusChangeRef.current = onStatusChange;
 
   const clearRetry = useCallback(() => {
     if (retryTimerRef.current) {
@@ -34,13 +37,16 @@ export function useWebSocket({ url, onMessage, reconnect = true }: UseWebSocketO
     if (retryCountRef.current >= MAX_RETRIES) {
       setStatus("disconnected");
       setRetryIn(0);
+      onStatusChangeRef.current?.("disconnected", 0);
       return;
     }
 
     const delay = Math.min(BASE_DELAY * Math.pow(2, retryCountRef.current), MAX_DELAY);
     retryCountRef.current += 1;
+    const secs = Math.ceil(delay / 1000);
     setStatus("reconnecting");
-    setRetryIn(Math.ceil(delay / 1000));
+    setRetryIn(secs);
+    onStatusChangeRef.current?.("connecting", secs);
 
     retryTimerRef.current = setTimeout(() => {
       setRetryIn(0);
@@ -60,6 +66,7 @@ export function useWebSocket({ url, onMessage, reconnect = true }: UseWebSocketO
       retryCountRef.current = 0;
       setStatus("connected");
       setRetryIn(0);
+      onStatusChangeRef.current?.("connected", 0);
     };
 
     ws.onmessage = (event) => {
@@ -78,6 +85,7 @@ export function useWebSocket({ url, onMessage, reconnect = true }: UseWebSocketO
         scheduleReconnect();
       } else {
         setStatus("disconnected");
+        onStatusChangeRef.current?.("disconnected", 0);
       }
     };
 
