@@ -46,7 +46,7 @@ export function useWebSocket({ url, onMessage, onStatusChange, reconnect = true 
     const secs = Math.ceil(delay / 1000);
     setStatus("reconnecting");
     setRetryIn(secs);
-    onStatusChangeRef.current?.("connecting", secs);
+    onStatusChangeRef.current?.("reconnecting", secs);
 
     retryTimerRef.current = setTimeout(() => {
       setRetryIn(0);
@@ -89,8 +89,8 @@ export function useWebSocket({ url, onMessage, onStatusChange, reconnect = true 
       }
     };
 
-    ws.onerror = () => {
-      // onclose will fire after this, triggering reconnect
+    ws.onerror = (e) => {
+      console.warn("[WS] Error — onclose will fire next, triggering reconnect");
     };
 
     wsRef.current = ws;

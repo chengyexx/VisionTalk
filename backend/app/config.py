@@ -9,36 +9,35 @@ load_dotenv()
 
 
 class Config:
-    # DeepSeek (primary model)
+    # DeepSeek (纯文本对话 + 摘要)
     DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
     DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 
-    # OpenAI (optional)
+    # ASR (OpenAI 兼容端点，复用 DashScope)
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
-    # Qwen / DashScope (optional)
+    # Qwen / DashScope (多模态主力)
     DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
 
     # Default models
-    DEFAULT_VLM_MODEL: str = os.getenv("DEFAULT_VLM_MODEL", "deepseek/deepseek-chat")
-    DEFAULT_ASR_MODEL: str = os.getenv("DEFAULT_ASR_MODEL", "whisper-1")
-    DEFAULT_TTS_MODEL: str = os.getenv("DEFAULT_TTS_MODEL", "openai/tts-1")
+    DEFAULT_VLM_MODEL: str = os.getenv("DEFAULT_VLM_MODEL", "dashscope/qwen-vl-max")
+    DEFAULT_ASR_MODEL: str = os.getenv("DEFAULT_ASR_MODEL", "sensevoice-v1")
+    DEFAULT_TTS_MODEL: str = os.getenv("DEFAULT_TTS_MODEL", "")
 
     # Available models for switching
     VLM_MODELS: list[str] = [
-        "deepseek/deepseek-chat",
-        "openai/gpt-4o",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4-turbo",
+        "dashscope/qwen-vl-max",       # Qwen VL Max (多模态，推荐)
+        "dashscope/qwen-vl-plus",      # Qwen VL Plus (多模态，轻量)
+        "deepseek/deepseek-chat",      # DeepSeek V3 (纯文本！不支持图片)
     ]
 
     ASR_MODELS: list[str] = [
-        "whisper-1",
+        "sensevoice-v1",              # 阿里 SenseVoice (DashScope)
+        "whisper-1",                   # OpenAI Whisper (需 OpenAI Key)
     ]
 
     TTS_MODELS: list[str] = [
-        "openai/tts-1",
-        "openai/tts-1-hd",
+        "edge-tts",                    # Microsoft Edge TTS (免费)
     ]
 
     # Edge TTS configuration
@@ -52,20 +51,18 @@ class Config:
     TTS_VOICE: str = os.getenv("TTS_VOICE", "alloy")
     TTS_SPEED: float = float(os.getenv("TTS_SPEED", "1.0"))
 
-    # Memory compression
+    # Memory compression (纯文本，不需要视觉)
     SUMMARY_MODEL: str = os.getenv("SUMMARY_MODEL", "deepseek/deepseek-chat")
 
     @classmethod
     def get_litellm_model_list(cls) -> list[str]:
         """All model IDs available via LiteLLM."""
         return [
+            "dashscope/qwen-vl-max",
+            "dashscope/qwen-vl-plus",
             "deepseek/deepseek-chat",
-            "openai/gpt-4o",
-            "openai/gpt-4o-mini",
-            "openai/gpt-4-turbo",
-            "openai/whisper-1",
-            "openai/tts-1",
-            "openai/tts-1-hd",
+            "sensevoice-v1",
+            "whisper-1",
         ]
 
 

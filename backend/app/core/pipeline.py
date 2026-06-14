@@ -1,8 +1,12 @@
 """
 Vision Talk — LangGraph 管线编排
-ASR → VLM → TTS 状态机 (PR3 Commit 2 骨架)。
+ASR → VLM → TTS 条件路由状态机。
 
-Graph: START → asr → vlm → tts → END
+路由逻辑:
+  START → ASR ─┬─ [有文本] → VLM ─┬─ [有回复] → TTS → END
+               │                  │
+               └─ [静音/失败] → END
+                                  └─ [失败] → END
 
 设计原则:
 - 严格 Pydantic 状态模型 — 所有字段有明确类型和默认值
@@ -11,11 +15,12 @@ Graph: START → asr → vlm → tts → END
 """
 import asyncio
 import base64
+import contextvars
+import logging
 from typing import Any
 from pydantic import BaseModel, Field
 
 from langgraph.graph import StateGraph, END, START
-from langgraph.checkpoint.memory import MemorySaver
 
 from app.core.asr import transcribe
 from app.core.vlm import (
@@ -26,22 +31,36 @@ from app.core.vlm import (
 )
 from app.core.tts import synthesize, split_sentences
 
+logger = logging.getLogger("vision_talk.pipeline")
+
 # ── 旁路推流回调 ────────────────────────────────────────────────
-# 模块级回调，由 PipelineExecutor.execute() 注入。
+# Context-local 变量，由 PipelineExecutor.execute() 注入。
+# 使用 ContextVar 而非模块级全局变量 — 确保多 WebSocket 连接并发时
+# 每个连接拥有独立的 sender 上下文，互不干扰。
 # vlm_node 通过此回调将 token/audio 直接推送到 WebSocket，
 # 实现全双工: VLM 边生成边推送，不等整句结束。
-_ws_sender: Any = None
+_ws_sender_ctx: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "ws_sender", default=None
+)
+
+_DEFAULT_VOID_SENDER: Any = None  # 哨兵值，用于安全类型比对
 
 
-def _set_ws_sender(sender: Any) -> None:
-    global _ws_sender
-    _ws_sender = sender
+def _set_ws_sender(sender: Any) -> contextvars.Token:
+    """注入旁路推流回调并返回 token，调用方用 token 恢复现场。"""
+    return _ws_sender_ctx.set(sender)
+
+
+def _clear_ws_sender(token: contextvars.Token) -> None:
+    """通过 token 恢复 ContextVar 到注入前的值。"""
+    _ws_sender_ctx.reset(token)
 
 
 async def _push(type_: str, **kwargs) -> None:
-    """推送消息到 WebSocket (如果已注入 sender)"""
-    if _ws_sender:
-        await _ws_sender({"type": type_, **kwargs})
+    """推送消息到当前上下文对应的 WebSocket (如果已注入 sender)"""
+    sender = _ws_sender_ctx.get()
+    if sender:
+        await sender({"type": type_, **kwargs})
 
 
 # ── 严格状态模型 ──────────────────────────────────────────────────
@@ -201,10 +220,37 @@ async def tts_node(state: ConversationState) -> dict:
     return {"tts_audio": audio_bytes, "error": ""}
 
 
+# ── 路由函数 (条件边) ──────────────────────────────────────────
+
+def _route_after_asr(state: ConversationState) -> str:
+    """ASR 节点后路由: 有识别文本 → VLM, 否则 → END (短路)"""
+    if state.asr_text and not state.error:
+        return "vlm"
+    return END
+
+
+def _route_after_vlm(state: ConversationState) -> str:
+    """VLM 节点后路由: 有回复文本 → TTS, 否则 → END (短路)"""
+    if state.vlm_response and not state.error:
+        return "tts"
+    return END
+
+
 # ── 图构建 ─────────────────────────────────────────────────────
 
 def build_graph() -> Any:
-    """编译 LangGraph 管线"""
+    """编译 LangGraph 管线 (无 checkpointer — 每次 invoke 都是全新执行)。
+
+    路由逻辑:
+        START → ASR ─┬─ [有文本] → VLM ─┬─ [有回复] → TTS → END
+                     │                  │
+                     └─ [失败/静音] → END
+                                        └─ [失败] → END
+
+    不使用 checkpointer — 每轮 start_turn 都从干净状态开始执行，
+    避免 LangGraph 从历史 checkpoint 中回放旧节点的输出导致
+    ASR/VLM 始终返回相同结果。
+    """
     builder = StateGraph(ConversationState)
 
     builder.add_node("asr", asr_node)
@@ -212,12 +258,22 @@ def build_graph() -> Any:
     builder.add_node("tts", tts_node)
 
     builder.add_edge(START, "asr")
-    builder.add_edge("asr", "vlm")
-    builder.add_edge("vlm", "tts")
+
+    # ASR → 条件路由: 有文本 → VLM, 否则短路到 END
+    builder.add_conditional_edges("asr", _route_after_asr, {
+        "vlm": "vlm",
+        END: END,
+    })
+
+    # VLM → 条件路由: 有回复 → TTS, 否则短路到 END
+    builder.add_conditional_edges("vlm", _route_after_vlm, {
+        "tts": "tts",
+        END: END,
+    })
+
     builder.add_edge("tts", END)
 
-    memory = MemorySaver()
-    return builder.compile(checkpointer=memory)
+    return builder.compile()
 
 
 # ── 管线执行器 ─────────────────────────────────────────────────
@@ -290,8 +346,10 @@ class PipelineExecutor:
             self.reset()
             return self.state
 
-        # 注入旁路推流回调
-        _set_ws_sender(ws_sender)
+        # 注入旁路推流回调 (ContextVar token 模式，保证 finally 恢复)
+        if ws_sender is None:
+            ws_sender = _DEFAULT_VOID_SENDER
+        token = _set_ws_sender(ws_sender)
 
         # 注入本轮的输入到状态中
         self.state.audio_chunk = audio_b64
@@ -315,8 +373,8 @@ class PipelineExecutor:
 
         except Exception as e:
             self.state.error = str(e)
-            print(f"[Pipeline] Execution failed: {e}")
+            logger.exception("Pipeline 执行失败: %s", e)
             return self.state
 
         finally:
-            _set_ws_sender(None)  # 清理回调
+            _clear_ws_sender(token)  # 通过 token 恢复，避免跨连接污染

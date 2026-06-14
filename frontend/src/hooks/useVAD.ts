@@ -44,9 +44,14 @@ export function useVAD({ onSpeechStart, onSpeechEnd }: UseVADOptions = {}) {
         },
         // v5 model is smaller and faster than legacy
         model: "v5",
-        // Paths relative to page origin — served from public/models/
+        // ONNX model + AudioWorklet → served from public/models/
         baseAssetPath: "/models/",
-        onnxWASMBasePath: "/models/",
+        // onnxruntime-web WASM 不能放 /public (Vite 禁止动态 import):
+        // 走 jsDelivr CDN 加载 .wasm + .mjs, 避免 Vite 报 404
+        ortConfig: (ort) => {
+          ort.env.wasm.wasmPaths =
+            "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/";
+        },
       });
 
       vad.start();

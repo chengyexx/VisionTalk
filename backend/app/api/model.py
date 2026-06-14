@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api")
 
 class ModelSwitchRequest(BaseModel):
     type: str    # "vlm" | "asr" | "tts"
-    model: str   # e.g. "openai/gpt-4o"
+    model: str   # e.g. "dashscope/qwen-vl-max"
 
 
 class ModelStateResponse(BaseModel):
@@ -66,7 +66,7 @@ async def switch_model(req: ModelSwitchRequest):
             status_code=400,
             detail=f"模型 '{req.model}' 不在 {req.type} 可用列表中",
         )
-    set_model(req.type, req.model)
+    await set_model(req.type, req.model)
     state = get_model_state()
     return ModelStateResponse(vlm=state["vlm"], asr=state["asr"], tts=state["tts"])
 
@@ -74,6 +74,6 @@ async def switch_model(req: ModelSwitchRequest):
 @router.post("/model/reset", response_model=ModelStateResponse)
 async def reset_model():
     """重置为 .env 默认模型"""
-    reset_models()
+    await reset_models()
     state = get_model_state()
     return ModelStateResponse(vlm=state["vlm"], asr=state["asr"], tts=state["tts"])

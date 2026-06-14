@@ -2,6 +2,7 @@
 Vision Talk — FastAPI Application Entry Point
 AI visual conversation assistant with edge-cloud collaborative architecture.
 """
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,19 +11,24 @@ from app.api.health import router as health_router
 from app.api.websocket import router as ws_router
 from app.api.model import router as model_router
 
+logger = logging.getLogger("vision_talk.main")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle: startup and shutdown hooks."""
-    print("[Vision Talk] Server starting...")
-    print("[Vision Talk] WebSocket endpoint: ws://localhost:8000/ws")
-    print("[Vision Talk] Model API:       http://localhost:8000/api/model/switch")
-    print("[Vision Talk] Available models:", end=" ")
+    from app.core.logging_config import setup_logging
+    setup_logging(level=logging.INFO)
+
+    logger.info("Server starting...")
+    logger.info("WebSocket endpoint: ws://localhost:8000/ws")
+    logger.info("Model API:       http://localhost:8000/api/model/switch")
     from app.core.llm import get_model_state
     state = get_model_state()
-    print(f"VLM={state['vlm']}, ASR={state['asr']}, TTS={state['tts']}")
+    logger.info("Available models: VLM=%s, ASR=%s, TTS=%s",
+                state["vlm"], state["asr"], state["tts"])
     yield
-    print("[Vision Talk] Server shutting down.")
+    logger.info("Server shutting down.")
 
 
 app = FastAPI(
@@ -32,14 +38,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: allow React dev server (Vite default port 5173)
+# CORS: limit to local dev origins only
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
-        "*",  # Allow all origins in development
     ],
     allow_credentials=True,
     allow_methods=["*"],

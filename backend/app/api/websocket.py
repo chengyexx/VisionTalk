@@ -30,6 +30,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.pipeline import PipelineExecutor
@@ -51,6 +52,9 @@ async def websocket_endpoint(ws: WebSocket):
 
     executor = PipelineExecutor()
     current_task: asyncio.Task | None = None
+    _task_started_at: float = 0
+    # 最短任务存活时间（秒）：新任务在此时长内不会被后续 start_turn 取消
+    _MIN_TASK_AGE = 1.0
 
     # ── 旁路推流回调 ────────────────────────────────────────
     # vlm_node 通过此回调将 token/audio 直接推送到 WebSocket。
@@ -120,8 +124,19 @@ async def websocket_endpoint(ws: WebSocket):
 
             # ── start_turn: 发起新一轮对话 ──
             if msg_type == "start_turn":
-                # 强杀上一轮 (如果还在跑)
+                audio_b64_in = data.get("audio_b64", "")
+
+                # 防御: 空音频 / 超短碎片直接丢弃，不给前端错误回显
+                if not audio_b64_in or len(audio_b64_in) < 100:
+                    logger.debug("丢弃过短音频 (len=%d)", len(audio_b64_in or ""))
+                    continue
+
+                # 强杀上一轮 — 但保护刚创建的任务（防止 VAD 高频触发连锁取消）
                 if current_task and not current_task.done():
+                    age = time.monotonic() - _task_started_at
+                    if age < _MIN_TASK_AGE:
+                        logger.debug("上一轮任务仅运行 %.1fs，跳过取消", age)
+                        continue
                     current_task.cancel()
                     try:
                         await current_task
@@ -133,10 +148,11 @@ async def websocket_endpoint(ws: WebSocket):
 
                 current_task = asyncio.create_task(
                     _run_pipeline(
-                        audio_b64=data.get("audio_b64", ""),
+                        audio_b64=audio_b64_in,
                         image_b64=data.get("image_b64", ""),
                     )
                 )
+                _task_started_at = time.monotonic()
 
             # ── interrupt: 打断 ──
             elif msg_type == "interrupt":

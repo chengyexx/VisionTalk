@@ -3,6 +3,9 @@ declare module "@ricky0123/vad-web" {
     onSpeechStart?: () => void;
     onSpeechEnd?: () => void;
     onVADMisfire?: () => void;
+    model?: "v5" | "legacy";
+    baseAssetPath?: string;
+    ortConfig?: (ort: { env: { wasm: { wasmPaths: string } } }) => void;
   }
 
   export class MicVAD {

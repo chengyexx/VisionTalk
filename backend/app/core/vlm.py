@@ -5,15 +5,16 @@ Vision Talk — VLM 多模态推理
 职责边界:
 - 多模态消息组装 (assemble_multimodal_message)
 - 流式推理 (vlm_inference)
-- 记忆压缩 (summarize_visual) — Step 6
+- 记忆压缩 (summarize_visual)
 
 设计原则:
 - 消息结构必须遵循 LiteLLM / OpenAI 多模态规范 (image_url + text content parts)
-- Mock 阶段也使用真实数据结构，避免后期返工
+- 使用 litellm.acompletion 统一调用 DeepSeek / OpenAI / Qwen 等
 """
-import asyncio
 import logging
 from typing import AsyncIterator
+
+from app.config import config
 from app.core.llm import chat, get_active_vlm_model
 
 logger = logging.getLogger("vision_talk.vlm")
@@ -31,14 +32,6 @@ SYSTEM_PROMPT = """你是 Vision Talk 助手，一个能够看到用户摄像头
 
 当你收到"[之前看到的]"信息时，这是对你之前看到的画面的文字总结，并非当前画面。
 当前画面永远是最新的帧数据。"""
-
-# ── Mock 配置 ────────────────────────────────────────────────────
-_MOCK_CHUNK_DELAY = 0.05         # 模拟流式 token 间隔 (秒)
-_MOCK_TOKENS = [
-    "我看到", "画面中", "是一块", "绿色的", "PCB", "开发板，",
-    "上面有", "一个", "红色", "LED", "在闪烁。",
-    "这通常", "表示", "电源", "正常", "工作。",
-]
 
 
 def assemble_multimodal_message(
@@ -95,54 +88,40 @@ async def vlm_inference(
     model: str | None = None,
 ) -> AsyncIterator[str]:
     """
-    多模态流式推理。
-
-    [MOCK] 返回预定义 token 序列 + 模拟延迟。
-    真实环境替换为 LiteLLM acompletion(stream=True) 逐 chunk yield。
+    多模态流式推理 — 通过 LiteLLM acompletion(stream=True)。
 
     Args:
         messages: 完整消息列表 (含 system + history + 新组装的多模态 user message)
         model:    指定模型 (None = 当前活跃 VLM)
 
     Yields:
-        单个文本 token
+        单个文本 token 字符串
     """
     model = model or get_active_vlm_model()
     logger.info("VLM 推理开始 (model=%s, messages=%d)", model, len(messages))
 
-    # ── [MOCK] 模拟 token 流 ──
-    for token in _MOCK_TOKENS:
-        await asyncio.sleep(_MOCK_CHUNK_DELAY)
-        yield token
+    try:
+        response = await chat(messages=messages, model=model, stream=True)
+        async for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+    except Exception as e:
+        logger.exception("VLM 推理失败: %s", e)
+        # 异常时返回空，pipeline 层会捕获 err 并写入 state.error
+        return
 
     logger.info("VLM 推理完成 (model=%s)", model)
 
 
-# ── 真实实现 (接入 LiteLLM 时替换上方 vlm_inference) ──────────
-#
-# async def vlm_inference(
-#     messages: list[dict],
-#     model: str | None = None,
-# ) -> AsyncIterator[str]:
-#     model = model or get_active_vlm_model()
-#     response = await chat(messages=messages, model=model, stream=True)
-#     async for chunk in response:
-#         if chunk.choices and chunk.choices[0].delta.content:
-#             yield chunk.choices[0].delta.content
-
-
 async def summarize_visual(asr_text: str, vlm_response: str) -> str:
     """
-    视觉记忆压缩: 从对话文本推断画面内容，生成一句话摘要。
+    视觉记忆压缩 — 从对话文本推断画面内容，生成一句话摘要。
 
     设计意图 (阅后即焚):
-    - 不用 key_frame — 廉价纯文本模型从 asr_text + vlm_response
-      即可推断出画面内容，零视觉 Token 消耗
+    - 零图片 Token 消耗 — 纯文本模型从 asr_text + vlm_response
+      推断画面内容
     - 摘要存入 visual_summary → 下轮作为 [之前看到的] 上下文
     - 原始图片 Base64 彻底丢弃，不进 messages 历史
-
-    [MOCK] 返回静态摘要。
-    真实环境调用 chat() 对纯文本模型做摘要提取。
 
     Args:
         asr_text:     用户语音文本 (如 "这个红灯是什么意思？")
@@ -154,12 +133,21 @@ async def summarize_visual(asr_text: str, vlm_response: str) -> str:
     if not vlm_response:
         return "用户没有展示画面"
 
-    # ── [MOCK] 从 VLM 回复中提取关键词作为摘要 ──
-    # 真实环境:
-    #   response = await chat(
-    #       messages=[{"role": "user", "content": f"用一句话概括画面: {vlm_response}"}],
-    #       model=config.SUMMARY_MODEL,
-    #       max_tokens=50,
-    #   )
-    #   return response.choices[0].message.content.strip()
-    return "[摘要] 一块红色LED闪烁的PCB开发板"
+    prompt = (
+        "根据以下对话，用一句话概括用户摄像头画面里有什么对象。"
+        "只回答画面内容，不要引入对话本身。\n\n"
+        f"用户: {asr_text}\nAI: {vlm_response}"
+    )
+
+    try:
+        response = await chat(
+            messages=[{"role": "user", "content": prompt}],
+            model=config.SUMMARY_MODEL,
+            max_tokens=50,
+        )
+        summary = response.choices[0].message.content.strip()
+        logger.info("视觉摘要: %s", summary)
+        return summary
+    except Exception as e:
+        logger.exception("摘要生成失败: %s", e)
+        return "用户展示了某个画面"
