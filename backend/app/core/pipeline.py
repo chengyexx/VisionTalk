@@ -18,6 +18,11 @@ from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
 
 from app.core.asr import transcribe
+from app.core.vlm import (
+    SYSTEM_PROMPT,
+    assemble_multimodal_message,
+    vlm_inference,
+)
 
 
 # ── 严格状态模型 ──────────────────────────────────────────────────
@@ -76,13 +81,57 @@ async def asr_node(state: ConversationState) -> dict:
 
 
 async def vlm_node(state: ConversationState) -> dict:
-    """多模态推理: key_frame + asr_text + history → vlm_response"""
-    frame_len = len(state.key_frame)
-    text = state.asr_text
-    print(f"[VLM Mock] frame={frame_len} chars, text='{text}'")
-    # TODO Step 4: 接入真实 VLM (vision streaming)
+    """多模态推理: 组装消息 → 流式推理 → 消化流 → 写 messages。
+
+    这是整个管线的「大脑」节点 — 唯一负责多模态消息组装和历史管理。
+    ASR 和 TTS 都不触碰 messages。
+    """
+    asr_text = state.asr_text
+    key_frame = state.key_frame or None
+    visual_summary = state.visual_summary or None
+
+    if not asr_text:
+        return {"error": "No ASR text to infer on"}
+
+    # ── 1. 组装多模态 user message ──
+    user_msg = assemble_multimodal_message(
+        asr_text=asr_text,
+        key_frame=key_frame,
+        visual_summary=visual_summary,
+    )
+
+    # ── 2. 构建完整消息列表: system + history + 新 user message ──
+    history = list(state.messages)          # 深拷贝历史
+    full_messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+    ]
+    full_messages.extend(history)           # 纯文本历史 (无历史图片 Base64)
+    full_messages.append(user_msg)          # 当前轮多模态 user message
+
+    # ── 3. 流式推理 + 消化流 ──
+    full_response = ""
+    try:
+        async for token in vlm_inference(full_messages):
+            full_response += token
+            # 预留: 未来通过 text_queue 推送 token 给前端
+    except Exception as e:
+        return {"error": f"VLM inference failed: {e}", "vlm_response": ""}
+
+    if not full_response:
+        return {"vlm_response": "", "error": "VLM returned empty response"}
+
+    # ── 4. 更新 messages 历史 ──
+    # 追加用户消息 + 助手回复 (VLM 节点是唯一操盘 messages 的地方)
+    new_messages = history + [
+        {"role": "user", "content": asr_text},    # 纯文本用户消息
+        {"role": "assistant", "content": full_response},
+    ]
+
+    # ── 5. 清理当前帧 (防止未来轮次累积 Base64) ──
     return {
-        "vlm_response": f"[MOCK] 看到画面并针对'{text}'的回复",
+        "vlm_response": full_response,
+        "messages": new_messages,
+        "key_frame": "",          # 清除以节省 token
         "error": "",
     }
 

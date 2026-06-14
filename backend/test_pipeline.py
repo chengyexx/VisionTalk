@@ -15,6 +15,24 @@ async def test_build():
     return graph
 
 
+async def test_multimodal_message_structure():
+    """测试: assemble_multimodal_message 输出符合 OpenAI/LiteLLM 规范"""
+    from app.core.vlm import assemble_multimodal_message
+
+    msg = assemble_multimodal_message(
+        asr_text="这是什么？",
+        key_frame="<<BASE64_JPEG>>",
+        visual_summary="一块开发板",
+    )
+
+    assert msg["role"] == "user"
+    assert isinstance(msg["content"], list), f"content should be list, got {type(msg['content'])}"
+    content_types = [c["type"] for c in msg["content"]]
+    assert "text" in content_types
+    assert "image_url" in content_types
+    print("[TEST] Multimodal message structure — PASSED")
+
+
 async def test_silence():
     """测试: 音频过短 → ASR 返回空字符串 (防御性)"""
     from app.core.pipeline import PipelineExecutor
@@ -38,9 +56,16 @@ async def test_single_turn():
     )
 
     assert result.error == "", f"Unexpected error: {result.error}"
-    assert "MOCK" in result.asr_text or result.asr_text != "", f"ASR: {result.asr_text}"
-    assert "MOCK" in result.vlm_response, f"VLM: {result.vlm_response}"
+    assert result.asr_text != "", f"ASR should not be empty: got '{result.asr_text}'"
+    # VLM mock tokens: "我看到画面中是一块绿色的PCB开发板，上面有一个红色LED在闪烁。这通常表示电源正常工作。"
+    assert "PCB" in result.vlm_response, f"VLM: {result.vlm_response}"
     assert result.tts_audio == b"MOCK_AUDIO", f"TTS: {result.tts_audio}"
+    # VLM 节点是消息历史的唯一操盘者
+    assert len(result.messages) >= 2, f"messages should have user+assistant, got {len(result.messages)}"
+    assert result.messages[-2]["role"] == "user"
+    assert result.messages[-1]["role"] == "assistant"
+    # key_frame 应在 VLM 处理后清除
+    assert result.key_frame == "", f"key_frame should be cleared, got {len(result.key_frame)} chars"
     print("[TEST] Single turn — PASSED")
 
 
@@ -53,12 +78,15 @@ async def test_multi_turn():
     # Turn 1
     r1 = await executor.execute(audio_b64="<<AUDIO_1>>", frame_b64="<<FRAME_1>>")
     assert r1.error == ""
-    print(f"  Turn 1: asr={r1.asr_text}, vlm={r1.vlm_response[:30]}...")
+    msg_count_1 = len(r1.messages)
+    print(f"  Turn 1: asr={r1.asr_text}, vlm={r1.vlm_response[:30]}..., messages={msg_count_1}")
 
-    # Turn 2
+    # Turn 2 — 消息应该累积
     r2 = await executor.execute(audio_b64="<<AUDIO_2>>", frame_b64="<<FRAME_2>>")
     assert r2.error == ""
-    print(f"  Turn 2: asr={r2.asr_text}, vlm={r2.vlm_response[:30]}...")
+    msg_count_2 = len(r2.messages)
+    print(f"  Turn 2: asr={r2.asr_text}, vlm={r2.vlm_response[:30]}..., messages={msg_count_2}")
+    assert msg_count_2 > msg_count_1, f"Messages should accumulate: {msg_count_2} > {msg_count_1}"
 
     print("[TEST] Multi-turn — PASSED")
 
@@ -94,6 +122,7 @@ async def main():
     print()
 
     await test_build()
+    await test_multimodal_message_structure()
     await test_silence()
     await test_single_turn()
     await test_multi_turn()
