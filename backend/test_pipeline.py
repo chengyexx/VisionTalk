@@ -119,7 +119,7 @@ async def test_reset():
     from app.core.pipeline import PipelineExecutor, initial_state, ConversationState
 
     executor = PipelineExecutor(thread_id="test-004")
-    await executor.execute(audio_b64="<<AUDIO>>")
+    await executor.execute(audio_b64="<<MOCK_AUDIO_12345>>")
     executor.reset()
 
     assert executor.state == initial_state()

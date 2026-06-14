@@ -21,6 +21,7 @@ from app.core.asr import transcribe
 from app.core.vlm import (
     SYSTEM_PROMPT,
     assemble_multimodal_message,
+    summarize_visual,
     vlm_inference,
 )
 from app.core.tts import synthesize
@@ -121,18 +122,24 @@ async def vlm_node(state: ConversationState) -> dict:
     if not full_response:
         return {"vlm_response": "", "error": "VLM returned empty response"}
 
-    # ── 4. 更新 messages 历史 ──
-    # 追加用户消息 + 助手回复 (VLM 节点是唯一操盘 messages 的地方)
+    # ── 4. 记忆压缩: 提取画面文字摘要 (阅后即焚) ──
+    # 从对话文本推断画面内容，不使用 key_frame → 零视觉 Token 消耗
+    new_summary = await summarize_visual(asr_text, full_response)
+
+    # ── 5. 更新 messages 历史 ──
+    # 只存纯文本！图片 Base64 是 transient payload，阅后即焚。
     new_messages = history + [
-        {"role": "user", "content": asr_text},    # 纯文本用户消息
+        {"role": "user", "content": asr_text},
         {"role": "assistant", "content": full_response},
     ]
 
-    # ── 5. 清理当前帧 (防止未来轮次累积 Base64) ──
+    # ── 6. 清理当前帧 + 返回 ──
+    # key_frame 阅后即焚 — 绝不进入 LangGraph 持久化状态
     return {
         "vlm_response": full_response,
+        "visual_summary": new_summary,
         "messages": new_messages,
-        "key_frame": "",          # 清除以节省 token
+        "key_frame": "",
         "error": "",
     }
 

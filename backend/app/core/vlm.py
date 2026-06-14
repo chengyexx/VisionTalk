@@ -131,20 +131,35 @@ async def vlm_inference(
 #             yield chunk.choices[0].delta.content
 
 
-async def summarize_visual(key_frame: str | None, vlm_response: str) -> str:
+async def summarize_visual(asr_text: str, vlm_response: str) -> str:
     """
-    视觉记忆压缩: 将当前画面 + AI 回复压缩为一句话摘要。
+    视觉记忆压缩: 从对话文本推断画面内容，生成一句话摘要。
 
-    [STUB] Step 6 实现 — 调用廉价纯文本模型生成摘要。
+    设计意图 (阅后即焚):
+    - 不用 key_frame — 廉价纯文本模型从 asr_text + vlm_response
+      即可推断出画面内容，零视觉 Token 消耗
+    - 摘要存入 visual_summary → 下轮作为 [之前看到的] 上下文
+    - 原始图片 Base64 彻底丢弃，不进 messages 历史
+
+    [MOCK] 返回静态摘要。
+    真实环境调用 chat() 对纯文本模型做摘要提取。
 
     Args:
-        key_frame:    本轮展示的画面 Base64
-        vlm_response: VLM 的完整文本回复
+        asr_text:     用户语音文本 (如 "这个红灯是什么意思？")
+        vlm_response: VLM 完整回复 (如 "我看到一块开发板，红色LED...")
 
     Returns:
-        中文摘要，如 "一块绿色PCB开发板，红色LED在闪烁"
+        中文一句话摘要，如 "一块红色LED闪烁的PCB开发板"
     """
-    if not key_frame:
+    if not vlm_response:
         return "用户没有展示画面"
-    # TODO Step 6: 接入 chat() 生成摘要
-    return "画面内容未知"
+
+    # ── [MOCK] 从 VLM 回复中提取关键词作为摘要 ──
+    # 真实环境:
+    #   response = await chat(
+    #       messages=[{"role": "user", "content": f"用一句话概括画面: {vlm_response}"}],
+    #       model=config.SUMMARY_MODEL,
+    #       max_tokens=50,
+    #   )
+    #   return response.choices[0].message.content.strip()
+    return "[摘要] 一块红色LED闪烁的PCB开发板"
