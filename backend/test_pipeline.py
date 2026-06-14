@@ -44,6 +44,17 @@ async def test_silence():
     print("[TEST] Silence defense — PASSED")
 
 
+async def test_split_sentences():
+    """测试: TTS 分句逻辑"""
+    from app.core.tts import split_sentences
+
+    result = split_sentences("我看到一块板子。上面有红灯！这是什么？")
+    assert len(result) == 3, f"Expected 3 sentences, got {len(result)}: {result}"
+    assert result[0] == "我看到一块板子。"
+    assert result[2] == "这是什么？"
+    print("[TEST] Split sentences — PASSED")
+
+
 async def test_single_turn():
     """测试: 单轮 pipeline 执行"""
     from app.core.pipeline import PipelineExecutor, ConversationState
@@ -59,7 +70,7 @@ async def test_single_turn():
     assert result.asr_text != "", f"ASR should not be empty: got '{result.asr_text}'"
     # VLM mock tokens: "我看到画面中是一块绿色的PCB开发板，上面有一个红色LED在闪烁。这通常表示电源正常工作。"
     assert "PCB" in result.vlm_response, f"VLM: {result.vlm_response}"
-    assert result.tts_audio == b"MOCK_AUDIO", f"TTS: {result.tts_audio}"
+    assert result.tts_audio == b"MOCK_AUDIO_PAYLOAD", f"TTS: {result.tts_audio}"
     # VLM 节点是消息历史的唯一操盘者
     assert len(result.messages) >= 2, f"messages should have user+assistant, got {len(result.messages)}"
     assert result.messages[-2]["role"] == "user"
@@ -123,6 +134,7 @@ async def main():
 
     await test_build()
     await test_multimodal_message_structure()
+    await test_split_sentences()
     await test_silence()
     await test_single_turn()
     await test_multi_turn()

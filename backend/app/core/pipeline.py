@@ -23,6 +23,7 @@ from app.core.vlm import (
     assemble_multimodal_message,
     vlm_inference,
 )
+from app.core.tts import synthesize
 
 
 # ── 严格状态模型 ──────────────────────────────────────────────────
@@ -137,13 +138,19 @@ async def vlm_node(state: ConversationState) -> dict:
 
 
 async def tts_node(state: ConversationState) -> dict:
-    """语音合成: vlm_response → tts_audio"""
-    response = state.vlm_response
-    if not response:
+    """语音合成: vlm_response → tts_audio。纯 I/O，不碰状态。
+
+    [未来全双工锚点] Phase 5:
+    当前 tts_node 等 vlm_node 完全执行完毕才启动 (LangGraph 串行)。
+    未来通过 asyncio.Queue 或 AsyncGenerator 边收 VLM 句子边并发合成，
+    降低首字响应延迟 (TTFB)。
+    """
+    text = state.vlm_response
+    if not text:
         return {"error": "No VLM response to synthesize"}
-    print(f"[TTS Mock] synthesizing '{response[:40]}...'")
-    # TODO Step 5: 接入真实 TTS (sentence-level streaming)
-    return {"tts_audio": b"MOCK_AUDIO", "error": ""}
+
+    audio_bytes = await synthesize(text)
+    return {"tts_audio": audio_bytes, "error": ""}
 
 
 # ── 图构建 ─────────────────────────────────────────────────────
