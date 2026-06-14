@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
 
+from app.core.asr import transcribe
+
 
 # ── 严格状态模型 ──────────────────────────────────────────────────
 
@@ -61,13 +63,16 @@ def initial_state() -> ConversationState:
 # ── 节点 (Mock 骨架 — 后续步骤填充) ────────────────────────────
 
 async def asr_node(state: ConversationState) -> dict:
-    """语音识别: audio_chunk → asr_text"""
+    """语音识别: audio_chunk → asr_text。不操作 messages。"""
     audio = state.audio_chunk
     if not audio:
         return {"error": "No audio data in state"}
-    # TODO Step 3: 接入真实 ASR
-    print(f"[ASR Mock] Received audio ({len(audio)} chars)")
-    return {"asr_text": "[MOCK] 用户识别文本", "error": ""}
+
+    text = await transcribe(audio)
+    if not text:
+        return {"asr_text": "", "error": "ASR returned empty (silence / error)"}
+
+    return {"asr_text": text, "error": ""}
 
 
 async def vlm_node(state: ConversationState) -> dict:

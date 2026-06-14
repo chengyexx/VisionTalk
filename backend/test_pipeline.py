@@ -15,6 +15,17 @@ async def test_build():
     return graph
 
 
+async def test_silence():
+    """测试: 音频过短 → ASR 返回空字符串 (防御性)"""
+    from app.core.pipeline import PipelineExecutor
+
+    executor = PipelineExecutor(thread_id="test-silence")
+    result = await executor.execute(audio_b64="short")
+    assert result.error != "" or result.asr_text == "", \
+        f"Expected error or empty ASR for short audio, got asr_text='{result.asr_text}'"
+    print("[TEST] Silence defense — PASSED")
+
+
 async def test_single_turn():
     """测试: 单轮 pipeline 执行"""
     from app.core.pipeline import PipelineExecutor, ConversationState
@@ -27,8 +38,8 @@ async def test_single_turn():
     )
 
     assert result.error == "", f"Unexpected error: {result.error}"
-    assert result.asr_text == "[MOCK] 用户识别文本", f"ASR: {result.asr_text}"
-    assert "[MOCK]" in result.vlm_response, f"VLM: {result.vlm_response}"
+    assert "MOCK" in result.asr_text or result.asr_text != "", f"ASR: {result.asr_text}"
+    assert "MOCK" in result.vlm_response, f"VLM: {result.vlm_response}"
     assert result.tts_audio == b"MOCK_AUDIO", f"TTS: {result.tts_audio}"
     print("[TEST] Single turn — PASSED")
 
@@ -83,6 +94,7 @@ async def main():
     print()
 
     await test_build()
+    await test_silence()
     await test_single_turn()
     await test_multi_turn()
     await test_precondition()
