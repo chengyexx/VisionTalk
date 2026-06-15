@@ -6,9 +6,17 @@ LiteLLM 以 OpenAI-compatible 格式统一调用 DeepSeek / OpenAI / Qwen 等，
 vision message (image_url) 由 LiteLLM 自动转换为各厂商的原生多模态格式。
 """
 import asyncio
+import logging
 from typing import Any
 from litellm import acompletion
 from ..config import config
+
+# ── 抑制 LiteLLM DEBUG 日志 ──
+import litellm
+litellm.set_verbose = False
+litellm.suppress_debug_info = True
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+logging.getLogger("litellm").setLevel(logging.WARNING)
 
 # ── 运行时模型覆盖 ─────────────────────────────────────────────────
 # 模块级全局变量，允许通过 API 在运行时切换模型。

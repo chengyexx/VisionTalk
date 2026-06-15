@@ -31,7 +31,7 @@ SYSTEM_PROMPT = """你是 Vision Talk 助手，一个通过摄像头实时观察
 3. 画面中有人的时候，你是对方的对话伙伴，不要机械地描述对方的外貌。
 
 视觉记忆规则:
-- 当你收到"[之前看到的]"信息时，这是一段历史摘要，可能会过时或与实际画面矛盾。
+- 当你收到"[之前看到的画面摘要]"信息时，这是一段历史摘要，可能会过时或与实际画面矛盾。
 - 当前摄像头画面永远比摘要更可信。如果摘要与当前画面矛盾，相信当前画面。
 - 如果摘要中描述的物体在当前画面中看不到，果断忽略摘要。
 
@@ -47,30 +47,48 @@ def assemble_multimodal_message(
     visual_summary: str | None = None,
 ) -> dict:
     """
-    组装单条 user message (纯文本，不发送图片 Base64)。
-
-    Args:
-        asr_text:       用户语音识别文本
-        key_frame:      当前摄像头帧 (保留参数，但不注入 — 节省 Token)
-        visual_summary: 历史画面文字摘要
-
-    Returns:
-        OpenAI-format 消息字典，content 为纯文本
+    工业级多模态消息组装，严格遵守 OpenAI/LiteLLM Vision 规范。
     """
     content: list[dict] = []
 
-    # 1. 用户语音 — 放在最前，权重最高
-    if asr_text:
-        content.append({"type": "text", "text": asr_text})
+    # ── 1. 视觉层 (图像或记忆) 优先 ──
+    if key_frame:
+        # Base64 头部防呆处理 (Double-Prefix 防御)
+        # 前端 canvas.toDataURL() 吐出的字符串自带 "data:image/jpeg;base64,"，
+        # 如果后端再盲目拼接一次，VLM 会解析出花屏或直接忽略图片。
+        if key_frame.startswith("data:image"):
+            image_url = key_frame
+        else:
+            image_url = f"data:image/jpeg;base64,{key_frame}"
 
-    # 2. 视觉摘要 (如果有)
-    if visual_summary:
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": image_url,
+                "detail": "auto"
+            }
+        })
+    elif visual_summary:
         content.append({
             "type": "text",
-            "text": f"[之前看到的]: {visual_summary}",
+            "text": f"[之前看到的画面摘要]: {visual_summary}"
         })
 
-    return {"role": "user", "content": content}
+    # ── 2. 文本层 (用户意图) 压底 ──
+    # 利用大模型的"近因效应 (Recency Bias)"：把用户真正的诉求放在序列末尾，
+    # 让 VLM 不会被长篇大论的图片 Base64 Token 冲散注意力。
+    if asr_text:
+        content.append({
+            "type": "text",
+            "text": asr_text
+        })
+    else:
+        # 纯视觉空转防御：VLM 的 content 只有 image 没有 text 会直接报错 400，
+        # 兜底提示词确保任何情况下都不会因缺字而崩溃。
+        content.append({
+            "type": "text",
+            "text": "请观察当前画面。"
+        })
 
     return {"role": "user", "content": content}
 
@@ -90,7 +108,7 @@ async def vlm_inference(
         单个文本 token 字符串
     """
     model = model or get_active_vlm_model()
-    logger.info("VLM 推理开始 (model=%s, messages=%d)", model, len(messages))
+    logger.debug("VLM 推理开始 (model=%s, messages=%d)", model, len(messages))
 
     try:
         response = await chat(messages=messages, model=model, stream=True)
@@ -102,7 +120,7 @@ async def vlm_inference(
         # 异常时返回空，pipeline 层会捕获 err 并写入 state.error
         return
 
-    logger.info("VLM 推理完成 (model=%s)", model)
+    logger.debug("VLM 推理完成 (model=%s)", model)
 
 
 async def summarize_visual(asr_text: str, vlm_response: str) -> str:
@@ -140,7 +158,7 @@ async def summarize_visual(asr_text: str, vlm_response: str) -> str:
             max_tokens=50,
         )
         summary = response.choices[0].message.content.strip()
-        logger.info("视觉摘要: %s", summary)
+        logger.debug("视觉摘要: %s", summary)
         return summary
     except Exception as e:
         logger.exception("摘要生成失败: %s", e)

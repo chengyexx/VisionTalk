@@ -48,7 +48,7 @@ async def transcribe(audio_b64: str) -> str:
 
     fingerprint = audio_b64[:30]
     audio_hash = hashlib.sha256(audio_b64.encode()).hexdigest()[:16]
-    logger.info(
+    logger.debug(
         "ASR 识别中... model=%s raw_b64_len=%d fingerprint=%s... hash=%s",
         get_active_asr_model() or "sensevoice-v1",
         len(audio_b64),
@@ -66,7 +66,7 @@ async def transcribe(audio_b64: str) -> str:
             bits_per_sample = struct.unpack_from("<H", audio_bytes, 34)[0]
             data_size = struct.unpack_from("<I", audio_bytes, 40)[0]
             duration_ms = (data_size / (sample_rate * channels * bits_per_sample / 8)) * 1000
-            logger.info(
+            logger.debug(
                 "ASR: WAV 校验 — sample_rate=%d Hz, channels=%d, bits=%d, "
                 "data_size=%d, duration=%.0f ms",
                 sample_rate, channels, bits_per_sample, data_size, duration_ms,
@@ -85,7 +85,7 @@ async def transcribe(audio_b64: str) -> str:
         )
 
         text = response if isinstance(response, str) else response.text
-        logger.info("ASR 识别完成 → '%s'", text.strip())
+        logger.debug("ASR 识别完成 → '%s'", text.strip())
         return text.strip()
 
     except Exception as e:

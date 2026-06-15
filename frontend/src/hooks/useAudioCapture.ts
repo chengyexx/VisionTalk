@@ -12,7 +12,7 @@ export function useAudioCapture() {
   const chunksRef = useRef<Blob[]>([]);
   const startTimeRef = useRef(0);
 
-  const start = useCallback(async (): Promise<void> => {
+  const start = useCallback(async (): Promise<boolean> => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -38,8 +38,11 @@ export function useAudioCapture() {
 
       recorder.start(100); // Collect chunks every 100ms
       mediaRecorderRef.current = recorder;
+      return true;
     } catch (err) {
       console.error("[Audio] Failed to start capture:", err);
+      mediaRecorderRef.current = null; // 清掉旧引用，防止 stop() 误判
+      return false;
     }
   }, []);
 

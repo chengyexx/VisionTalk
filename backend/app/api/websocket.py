@@ -135,7 +135,7 @@ async def websocket_endpoint(ws: WebSocket):
 
                 # 音频指纹 — 对比前后端指纹确认传输一致性
                 audio_hash = hashlib.sha256(audio_b64_in.encode()).hexdigest()[:16]
-                logger.info(
+                logger.debug(
                     "WS start_turn — audio_len=%d audio_hash=%s audio_fp=%s... "
                     "frame_len=%d",
                     len(audio_b64_in),
@@ -156,8 +156,8 @@ async def websocket_endpoint(ws: WebSocket):
                     except asyncio.CancelledError:
                         pass
 
-                # 重置管线状态，开启新一轮
-                executor.reset()
+                # 准备新一轮 (保留对话历史，仅清空中断标志)
+                executor.prepare_turn()
 
                 current_task = asyncio.create_task(
                     _run_pipeline(
@@ -177,7 +177,8 @@ async def websocket_endpoint(ws: WebSocket):
                     except asyncio.CancelledError:
                         pass
 
-                executor.reset()
+                # 仅取消当前任务，不清空对话历史
+                executor.interrupt_event.clear()
                 await ws.send_json({"type": "state_change", "state": "idle"})
 
             # ── 未知消息 ──

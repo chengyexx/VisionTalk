@@ -38,6 +38,7 @@ function statusDotClass(s: WSStatus): string {
 export default function App() {
   const cameraRef = useRef<CameraHandle>(null);
   const audioPlayingRef = useRef(false);
+  const flushPendingRef = useRef<() => void>(() => {});
 
   // ── 对话层 ──
   const {
@@ -52,13 +53,14 @@ export default function App() {
     isAiSpeaking,
   } = useConversation({
     wsUrl: WS_URL,
+    onAiIdle: () => flushPendingRef.current(),
   });
 
-  // 同步 audioPlaying 到 ref (避免 useTurnPipeline 回调重建)
+  // 同步 audioPlaying 到 ref
   audioPlayingRef.current = audioPlaying;
 
   // ── 管线层 ──
-  const { isSpeaking, vadState, frameCount, diffReason } = useTurnPipeline({
+  const { isSpeaking, vadState, frameCount, diffReason, flushPending } = useTurnPipeline({
     cameraRef,
     wsStatus,
     isAiSpeaking,
@@ -77,6 +79,8 @@ export default function App() {
       [send]
     ),
   });
+
+  flushPendingRef.current = flushPending;
 
   // ── 模型切换 ──
   const cycleModel = () => {

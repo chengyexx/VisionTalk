@@ -18,13 +18,15 @@ interface UseConversationOptions {
   wsUrl: string;
   /** 外部调用: 打断时执行（停止录音/重置） */
   onInterrupt?: () => void;
+  /** AI 进入 idle 状态时回调 */
+  onAiIdle?: () => void;
 }
 
 /**
  * 对话状态管理 — 消息历史 + WebSocket + 模型切换 + 打断协调。
  * 统一管理所有与 conversational state 相关的逻辑。
  */
-export function useConversation({ wsUrl, onInterrupt }: UseConversationOptions) {
+export function useConversation({ wsUrl, onInterrupt, onAiIdle }: UseConversationOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [wsStatus, setWsStatus] = useState<WSStatus>("disconnected");
   const [retryIn, setRetryIn] = useState(0);
@@ -38,10 +40,20 @@ export function useConversation({ wsUrl, onInterrupt }: UseConversationOptions) 
     (data: unknown) => {
       const m = data as Record<string, unknown>;
       switch (m.type) {
+        case "asr_final": {
+          const asrText = m.text as string;
+          if (asrText) {
+            setMessages((prev) => [...prev, newMsg("user", asrText)]);
+          }
+          break;
+        }
         case "state_change": {
           const st = m.state as string;
           if (st === "thinking") isAiSpeakingRef.current = true;
-          if (st === "idle") isAiSpeakingRef.current = false;
+          if (st === "idle") {
+            isAiSpeakingRef.current = false;
+            onAiIdle?.();
+          }
           setMessages((p) => [
             ...p,
             newMsg("system", st === "thinking" ? "AI 思考中..." : "就绪"),
@@ -81,15 +93,25 @@ export function useConversation({ wsUrl, onInterrupt }: UseConversationOptions) 
         case "turn_end": {
           const p = m.payload as Record<string, unknown>;
           const vlm = (p?.vlm_response as string) || "";
-          const asr = (p?.asr_text as string) || "";
           if (p?.error) {
             setMessages((prev) => [...prev, newMsg("system", `错误: ${p.error}`)]);
             return;
           }
-          if (asr) setMessages((prev) => [...prev, newMsg("user", asr)]);
           setMessages((prev) => {
-            const filtered = prev.filter((x) => x.role !== "assistant-streaming");
-            return [...filtered, newMsg("assistant", vlm)];
+            console.log("[turn_end] before — msgs=%d roles=%s",
+              prev.length,
+              prev.map((x: Message) => x.role.charAt(0)).join(""));
+            // 移除流式残影 + 内部状态标记 ("AI 思考中..." / "就绪")
+            const cleaned = prev.filter(
+              (x) =>
+                x.role !== "assistant-streaming" &&
+                !(x.role === "system" && (x.content === "AI 思考中..." || x.content === "就绪"))
+            );
+            const result = [...cleaned, newMsg("assistant", vlm)];
+            console.log("[turn_end] after — msgs=%d roles=%s",
+              result.length,
+              result.map((x: Message) => x.role.charAt(0)).join(""));
+            return result;
           });
           break;
         }

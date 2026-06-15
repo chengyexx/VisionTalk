@@ -125,7 +125,8 @@ async def asr_node(state: ConversationState) -> dict:
             logger.warning("ASR: 识别结果为空 (静音或失败)")
         else:
             new_asr_text = text
-            logger.info("ASR: 识别成功 → '%s'", text[:50])
+            await _push("asr_final", text=text)
+            logger.debug("ASR: 识别成功 → '%s'", text[:50])
 
     # 显式返回两个字段 — 确保 LangGraph merge 时覆盖旧值
     return {"asr_text": new_asr_text, "error": new_error}
@@ -153,6 +154,7 @@ async def vlm_node(state: ConversationState) -> dict:
 
     # ── 2. 构建完整消息列表: system + history + 新 user message ──
     history = list(state.messages)          # 深拷贝历史
+    logger.debug("vlm_node: 历史消息数=%d, 当前ASR='%s'", len(history), asr_text[:30])
     full_messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
     ]
@@ -160,9 +162,29 @@ async def vlm_node(state: ConversationState) -> dict:
     full_messages.append(user_msg)          # 当前轮多模态 user message
 
     # ── 3. 全双工旁路推流: token → 前端打字机, 整句 → TTS → 前端播放 ──
+    # Ordered TTS: 并发合成 (抢占最短耗时)，推流严格保序
     full_response = ""
     sentence_buffer = ""
     SENTENCE_ENDS = {"。", "！", "？", ".", "!", "?"}
+
+    tts_task_queue: asyncio.Queue[asyncio.Task[bytes] | None] = asyncio.Queue()
+
+    async def ordered_tts_pusher() -> None:
+        """按 create_task 顺序 await 音频并推流。各句 TTS 并发赛跑抢结果，
+        但推送严格等上一句播完。"""
+        while True:
+            task = await tts_task_queue.get()
+            if task is None:  # 哨兵 — 下班
+                break
+            try:
+                audio_bytes = await task
+                if audio_bytes:
+                    chunk_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                    await _push("tts_chunk", audio_b64=chunk_b64)
+            except Exception:
+                logger.warning("后台 TTS 失败", exc_info=True)
+
+    pusher = asyncio.create_task(ordered_tts_pusher())
 
     try:
         async for token in vlm_inference(full_messages):
@@ -172,31 +194,29 @@ async def vlm_node(state: ConversationState) -> dict:
             # 旁路 A: 每个 token 实时推给前端 (打字机效果)
             await _push("vlm_token", text=token)
 
-            # 旁路 B: 遇到句子结束标点 → 立刻合成语音推送
+            # 旁路 B: 遇到切分标点 → 并发发起 TTS 合成，排队推流
             if token in SENTENCE_ENDS:
                 sentence = sentence_buffer.strip()
                 if sentence:
-                    audio_bytes = await synthesize(sentence)
-                    if audio_bytes:
-                        chunk_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-                        await _push("tts_chunk", audio_b64=chunk_b64)
+                    task = asyncio.create_task(synthesize(sentence))
+                    await tts_task_queue.put(task)
                 sentence_buffer = ""
 
     except Exception as e:
         return {"error": f"VLM inference failed: {e}", "vlm_response": ""}
 
-    # 扫尾: 最后一句没有标点的残留文本
-    if sentence_buffer.strip():
-        audio_bytes = await synthesize(sentence_buffer.strip())
-        if audio_bytes:
-            chunk_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-            await _push("tts_chunk", audio_b64=chunk_b64)
+    finally:
+        # 扫尾: 残留文本 + 哨兵通知 pusher 下班
+        if sentence_buffer.strip():
+            task = asyncio.create_task(synthesize(sentence_buffer.strip()))
+            await tts_task_queue.put(task)
+        await tts_task_queue.put(None)
+        await pusher
 
     if not full_response:
         return {"vlm_response": "", "error": "VLM returned empty response"}
 
-    # ── 4. 记忆压缩: 提取画面文字摘要 (阅后即焚) ──
-    # 从对话文本推断画面内容，不使用 key_frame → 零视觉 Token 消耗
+    # ── 4. 记忆压缩: 从 VLM 回复推断画面内容，生成纯文本摘要 (阅后即焚) ──
     new_summary = await summarize_visual(asr_text, full_response)
 
     # ── 5. 更新 messages 历史 ──
@@ -218,19 +238,12 @@ async def vlm_node(state: ConversationState) -> dict:
 
 
 async def tts_node(state: ConversationState) -> dict:
-    """语音合成: vlm_response → tts_audio。纯 I/O，不碰状态。
+    """语音合成直通 (Pass-through)。
 
-    [未来全双工锚点] Phase 5:
-    当前 tts_node 等 vlm_node 完全执行完毕才启动 (LangGraph 串行)。
-    未来通过 asyncio.Queue 或 AsyncGenerator 边收 VLM 句子边并发合成，
-    降低首字响应延迟 (TTFB)。
+    流式 TTS 已在 vlm_node 的旁路推送中逐个句子完成，
+    tts_node 仅作为状态机收尾节点，不再重复合成。
     """
-    text = state.vlm_response
-    if not text:
-        return {"error": "No VLM response to synthesize"}
-
-    audio_bytes = await synthesize(text)
-    return {"tts_audio": audio_bytes, "error": ""}
+    return {"tts_audio": b"", "error": ""}
 
 
 # ── 路由函数 (条件边) ──────────────────────────────────────────
@@ -315,8 +328,16 @@ class PipelineExecutor:
     # ── 生命周期 ──
 
     def reset(self) -> None:
-        """重置为全新会话 (清空历史 + 记忆)"""
+        """重置为全新会话 (清空历史 + 记忆 + 打断标志) — interrupt 路径使用"""
         self.state = initial_state()
+        self.interrupt_event.clear()
+
+    def prepare_turn(self) -> None:
+        """准备新一轮 — 保留 messages 和 visual_summary，仅清空中断标志。
+        
+        与 reset() 的区别: 不清空对话历史，让多轮对话有上下文记忆。
+        start_turn 路径使用此方法。
+        """
         self.interrupt_event.clear()
 
     def interrupt(self) -> None:
@@ -367,10 +388,11 @@ class PipelineExecutor:
         # 注入本轮的输入到状态中
         audio_fingerprint = audio_b64[:30] if audio_b64 else "(empty)"
         logger.info(
-            "管线执行开始 — audio_fp=%s... audio_len=%d frame_len=%d",
+            "━━━ 管线执行开始 — audio_fp=%s... audio=%db frame=%db msgs=%d ━━━",
             audio_fingerprint,
             len(audio_b64),
             len(frame_b64 or ""),
+            len(self.state.messages),
         )
 
         self.state.audio_chunk = audio_b64
@@ -390,6 +412,12 @@ class PipelineExecutor:
             )
 
             self.state = ConversationState(**result)
+            logger.info(
+                "━━━ 管线执行完成 — asr='%s' vlm_len=%d msgs=%d ━━━",
+                self.state.asr_text[:30],
+                len(self.state.vlm_response),
+                len(self.state.messages),
+            )
             return self.state
 
         except Exception as e:

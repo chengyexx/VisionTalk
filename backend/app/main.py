@@ -18,14 +18,11 @@ logger = logging.getLogger("vision_talk.main")
 async def lifespan(app: FastAPI):
     """Application lifecycle: startup and shutdown hooks."""
     from .core.logging_config import setup_logging
-    setup_logging(level=logging.INFO)
+    setup_logging()
 
-    logger.info("Server starting...")
-    logger.info("WebSocket endpoint: ws://localhost:8000/ws")
-    logger.info("Model API:       http://localhost:8000/api/model/switch")
     from .core.llm import get_model_state
     state = get_model_state()
-    logger.info("Available models: VLM=%s, ASR=%s, TTS=%s",
+    logger.info("Vision Talk 已启动 — ws://0.0.0.0:8000/ws | VLM=%s ASR=%s TTS=%s",
                 state["vlm"], state["asr"], state["tts"])
     yield
     logger.info("Server shutting down.")

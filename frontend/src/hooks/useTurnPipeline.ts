@@ -9,13 +9,9 @@ interface TurnPipelineOptions {
   cameraRef: React.RefObject<CameraHandle | null>;
   wsStatus: WSStatus;
   isAiSpeaking: () => boolean;
-  /** TTS 音频是否正在播放 — 用于防止麦克风收录 AI 语音 (反馈回路) */
   isAudioPlaying: () => boolean;
-  /** 用户打断回调 — 外部负责 stopAudio + 提示 + interrupt 消息 */
   onBargeIn: () => void;
-  /** 发送管线轮次 */
   onSendTurn: (audioB64: string, frameB64: string) => void;
-  /** 状态变更回调 */
   onStatusChange?: (state: TurnPipelineState) => void;
 }
 
@@ -26,14 +22,9 @@ export interface TurnPipelineState {
   diffReason: string;
 }
 
-const MIN_TURN_INTERVAL = 2000; // 相邻两轮最少间隔 2 秒
-const MIN_AUDIO_B64_LEN = 200;  // Base64 音频至少 200 字符
+const MIN_TURN_INTERVAL = 2000;
+const MIN_AUDIO_B64_LEN = 200;
 
-/**
- * 管线协调器 — VAD 触发 + 关键帧检测 + 发送完整轮次。
- *
- * 覆盖业务: 打断逻辑 (barge-in)、冷却守卫、帧差分过滤、音频长度守卫。
- */
 export function useTurnPipeline({
   cameraRef,
   wsStatus,
@@ -51,11 +42,14 @@ export function useTurnPipeline({
   const lastFrameRef = useRef("");
   const lastTurnSentRef = useRef(0);
   const isRecordingRef = useRef(false);
+  // AI 说话期间用户插话 → 暂存等 AI 讲完再发
+  const pendingAudioRef = useRef<string | null>(null);
+  const pendingFrameRef = useRef("");
 
-  const { shouldSend: shouldSendFrame } = useKeyFrameDetector();
+  const { shouldSend: shouldSendFrame, reset: resetFrameDetector } = useKeyFrameDetector();
   const audioCapture = useAudioCapture();
+  const lastTtsEndRef = useRef(0);
 
-  // ── 状态变更通知 ──
   const notifyChange = useCallback(() => {
     onStatusChange?.({ isSpeaking, vadState, frameCount, diffReason });
   }, [onStatusChange, isSpeaking, vadState, frameCount, diffReason]);
@@ -64,24 +58,71 @@ export function useTurnPipeline({
     notifyChange();
   }, [isSpeaking, vadState, frameCount, diffReason, notifyChange]);
 
+  // ── 发送当前轮次 (公共逻辑) ──
+  const trySend = useCallback(
+    async (audioB64: string | null, frame: string): Promise<boolean> => {
+      if (!audioB64) return false;
+      const now = Date.now();
+      if (now - lastTurnSentRef.current < MIN_TURN_INTERVAL) {
+        setDiffReason("冷却中...");
+        return false;
+      }
+      if (audioB64.length < MIN_AUDIO_B64_LEN) {
+        setDiffReason("音频过短");
+        return false;
+      }
+      const result = await shouldSendFrame(frame, true);
+      if (!result.shouldSend) {
+        setDiffReason(result.reason);
+        return false;
+      }
+      setDiffReason(result.reason);
+      if (wsStatus === "connected") {
+        lastTurnSentRef.current = now;
+        resetFrameDetector();  // 每轮成功后重置帧基准，静态画面不再挡路
+        onSendTurn(audioB64, frame || "");
+        return true;
+      }
+      return false;
+    },
+    [shouldSendFrame, resetFrameDetector, wsStatus, onSendTurn],
+  );
+
+  // ── AI 空闲时发送暂存的插话 ──
+  const flushPending = useCallback(async () => {
+    const audio = pendingAudioRef.current;
+    const frame = pendingFrameRef.current;
+    if (!audio) return;
+
+    // 标记 TTS 结束时刻 — 500ms 内忽略麦克风收到的残余音频
+    lastTtsEndRef.current = Date.now();
+
+    console.log("[TurnPipeline] AI 空闲，发送暂存轮次");
+    const sent = await trySend(audio, frame);
+    if (sent) {
+      pendingAudioRef.current = null;
+      pendingFrameRef.current = "";
+    }
+    // trySend 失败 → pending 保留，等下次 idle 重试
+  }, [trySend]);
+
   // ── 语音开始 ──
   const handleSpeechStart = useCallback(async () => {
     if (wsStatus !== "connected") return;
 
-    // 防御: AI 正在说话或 TTS 正在播放 → 此时检测到的"语音"可能是
-    // 扬声器播放的 AI 语音被麦克风收录 (反馈回路)
+    // 用户抢话：先发送 interrupt + 物理掐断音频
     if (isAiSpeaking() || isAudioPlaying()) {
-      // Barge-in — 用户打断 (AI 生成中或 TTS 播放中)
-      // 关键: 只停止录音，不重启。让 VAD 在 TTS 结束后自然回到 idle，
-      //       下次 VAD 检测到的才是真正的用户语音。
-      isRecordingRef.current = false;
       onBargeIn();
-      await audioCapture.stop();
-      return;
+      // 退晕期：扬声器物理惯性残余 200ms 内不启动录音，防僵尸音频回路
+      await new Promise((r) => setTimeout(r, 200));
     }
 
-    // 正常开始
-    await audioCapture.start();
+    const ok = await audioCapture.start();
+    if (!ok) {
+      console.warn("[TurnPipeline] audioCapture.start() 失败");
+      isRecordingRef.current = false;
+      return;
+    }
     isRecordingRef.current = true;
     const frame = cameraRef.current?.captureFrame();
     if (frame) {
@@ -102,32 +143,28 @@ export function useTurnPipeline({
       return;
     }
 
-    // 冷却守卫
-    const now = Date.now();
-    if (now - lastTurnSentRef.current < MIN_TURN_INTERVAL) {
-      setDiffReason("冷却中...");
+    // TTS 反馈回路保护: 麦克风收到的残余 TTS 音频 → 500ms 窗口内直接丢弃
+    if (Date.now() - lastTtsEndRef.current < 500) {
+      console.log("[TurnPipeline] TTS 保护期，丢弃疑似回声");
+      setDiffReason("TTS保护期");
       return;
     }
 
-    // 音频长度守卫
-    if (audioB64.length < MIN_AUDIO_B64_LEN) {
-      setDiffReason("音频过短");
+    // AI 还在说话 → 暂存，等 AI 讲完再发
+    if (isAiSpeaking() || isAudioPlaying()) {
+      pendingAudioRef.current = audioB64;
+      pendingFrameRef.current = frame || "";
+      console.log("[TurnPipeline] AI 正在讲话，暂存用户语音");
       return;
     }
 
-    // 帧差分过滤
-    const result = await shouldSendFrame(frame, true);
-    if (!result.shouldSend) {
-      setDiffReason(result.reason);
-      return;
+    const sent = await trySend(audioB64, frame || "");
+    if (!sent) {
+      // trySend 失败 (冷却期/帧差/短音频) → 暂存等待下次机会
+      pendingAudioRef.current = audioB64;
+      pendingFrameRef.current = frame || "";
     }
-    setDiffReason(result.reason);
-
-    if (wsStatus === "connected") {
-      lastTurnSentRef.current = now;
-      onSendTurn(audioB64, frame || "");
-    }
-  }, [audioCapture, shouldSendFrame, wsStatus, onSendTurn]);
+  }, [audioCapture, trySend, isAiSpeaking, isAudioPlaying]);
 
   // ── VAD 集成 ──
   const vad = useVAD({
@@ -139,5 +176,5 @@ export function useTurnPipeline({
     setVadState(vad.vadState);
   }, [vad.isSpeaking, vad.vadState]);
 
-  return { isSpeaking, vadState, frameCount, diffReason };
+  return { isSpeaking, vadState, frameCount, diffReason, flushPending };
 }
