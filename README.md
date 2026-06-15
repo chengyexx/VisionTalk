@@ -132,8 +132,3 @@ frontend/
 | POST | `/api/model/switch` | 切换 VLM 模型 |
 | WS | `/ws` | WebSocket 全双工对话 |
 
-## 已知限制
-
-- 打断后对话历史不会保留在 AI 上下文中 (v1 已定位到 `PipelineExecutor` State 未跨轮保持，待修复)
-- 纯文本模型 (DeepSeek) 下 VLM 不处理图片，会退化为基础对话模式
-- 控制台日志仅输出 WARNING 级别，DEBUG 日志见 `backend/logs/vision_talk.log`
