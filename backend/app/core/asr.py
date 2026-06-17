@@ -19,23 +19,32 @@ from .llm import get_active_asr_model
 
 logger = logging.getLogger("vision_talk.asr")
 
-# ── 客户端 (延迟初始化，避免无凭证时报错) ──────────────────────
-_asr_client: AsyncOpenAI | None = None
+# ── 多客户端缓存 (按模型前缀路由) ───────────────────────
+_clients: dict[str, AsyncOpenAI] = {}
 
 
-def _get_client() -> AsyncOpenAI:
-    global _asr_client
-    if _asr_client is None:
-        _asr_client = AsyncOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY", ""),
-            base_url=os.getenv("OPENAI_BASE_URL") or None,
-        )
-    return _asr_client
+def _get_client(model: str) -> AsyncOpenAI:
+    """按模型前缀返回对应客户端: FunAudioLLM→硅基流动, whisper→Groq"""
+    if model.startswith("FunAudioLLM/"):
+        prefix = "siliconflow"
+        if prefix not in _clients:
+            _clients[prefix] = AsyncOpenAI(
+                api_key=os.getenv("SILICONFLOW_API_KEY", ""),
+                base_url=os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
+            )
+    else:
+        prefix = "groq"
+        if prefix not in _clients:
+            _clients[prefix] = AsyncOpenAI(
+                api_key=os.getenv("OPENAI_API_KEY", ""),
+                base_url=os.getenv("OPENAI_BASE_URL") or None,
+            )
+    return _clients[prefix]
 
 
 async def transcribe(audio_b64: str) -> str:
     """
-    语音转文字 — 通过 OpenAI 兼容端点 (DashScope compatible-mode/v1)。
+    语音转文字 — 硅基流动 SenseVoiceSmall (中文原生) / Groq Whisper 备选。
 
     Args:
         audio_b64: Base64 编码 WAV/PCM 16kHz 音频
@@ -75,14 +84,15 @@ async def transcribe(audio_b64: str) -> str:
         audio_io = io.BytesIO(audio_bytes)
         audio_io.name = "audio.wav"
 
-        model = get_active_asr_model() or "sensevoice-v1"
-        client = _get_client()
+        model = get_active_asr_model() or "FunAudioLLM/SenseVoiceSmall"
+        client = _get_client(model)
 
-        response = await client.audio.transcriptions.create(
-            model=model,
-            file=audio_io,
-            response_format="text",
-        )
+        request_args: dict = dict(model=model, file=audio_io)
+        if model.startswith("whisper-"):
+            request_args["language"] = "zh"
+            request_args["response_format"] = "text"
+
+        response = await client.audio.transcriptions.create(**request_args)
 
         text = response if isinstance(response, str) else response.text
         logger.debug("ASR 识别完成 → '%s'", text.strip())

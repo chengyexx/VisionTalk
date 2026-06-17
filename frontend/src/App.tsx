@@ -1,6 +1,7 @@
-import { useRef, useCallback } from "react";
+import { useRef, useCallback, useMemo, useState, useEffect } from "react";
 import Camera from "./components/Camera";
 import type { CameraHandle } from "./components/Camera";
+import Mascot, { type MascotState } from "./components/Mascot";
 import { useConversation } from "./hooks/useConversation";
 import { useTurnPipeline } from "./hooks/useTurnPipeline";
 import type { WSStatus } from "./hooks/useWebSocket";
@@ -9,36 +10,30 @@ import "./App.css";
 const WS_URL = "ws://localhost:8000/ws";
 const MODELS = ["dashscope/qwen-vl-max", "dashscope/qwen-vl-plus", "deepseek/deepseek-chat"];
 
-/** 状态文本映射 */
 function statusLabel(s: WSStatus, retry: number): string {
   switch (s) {
-    case "connected":
-      return "ONLINE";
-    case "reconnecting":
-      return `RETRY ${retry > 0 ? `(${retry}s)` : ""}`;
-    case "connecting":
-      return `CONNECTING ${retry > 0 ? `(${retry}s)` : ""}`;
-    default:
-      return "OFFLINE";
+    case "connected": return "ONLINE";
+    case "reconnecting": return `RETRY ${retry > 0 ? `(${retry}s)` : ""}`;
+    case "connecting": return `CONNECTING ${retry > 0 ? `(${retry}s)` : ""}`;
+    default: return "OFFLINE";
   }
 }
 
 function statusDotClass(s: WSStatus): string {
   switch (s) {
-    case "connected":
-      return "online";
+    case "connected": return "online";
     case "reconnecting":
-    case "connecting":
-      return "connecting";
-    default:
-      return "offline";
+    case "connecting": return "connecting";
+    default: return "offline";
   }
 }
 
 export default function App() {
   const cameraRef = useRef<CameraHandle>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
   const audioPlayingRef = useRef(false);
-  const flushPendingRef = useRef<() => void>(() => {});
+  const [startledAt, setStartledAt] = useState(0);
+  const [running, setRunning] = useState(false);
 
   // ── 对话层 ──
   const {
@@ -47,40 +42,59 @@ export default function App() {
     retryIn,
     currentModel,
     audioPlaying,
+    isAiSpeaking,
+    isThinking,
     send,
     switchModel,
     interrupt,
-    isAiSpeaking,
   } = useConversation({
     wsUrl: WS_URL,
-    onAiIdle: () => flushPendingRef.current(),
   });
 
-  // 同步 audioPlaying 到 ref
   audioPlayingRef.current = audioPlaying;
 
   // ── 管线层 ──
-  const { isSpeaking, vadState, frameCount, diffReason, flushPending } = useTurnPipeline({
+  const { isSpeaking, vadState, frameCount, diffReason } = useTurnPipeline({
     cameraRef,
     wsStatus,
+    active: running,
     isAiSpeaking,
     isAudioPlaying: () => audioPlayingRef.current,
-    onBargeIn: interrupt,
+    onBargeIn: () => {
+      setStartledAt(Date.now());
+      interrupt();
+    },
     onSendTurn: useCallback(
       (audioB64: string, frameB64: string) => {
-        console.log(
-          "[SendTurn] audio_len=%d audio_fp=%s frame_len=%d",
-          audioB64.length,
-          audioB64.slice(0, 30),
-          frameB64.length,
-        );
+        console.log("[SendTurn] audio=%db frame=%db", audioB64.length, frameB64.length);
         send({ type: "start_turn", audio_b64: audioB64, image_b64: frameB64 });
       },
       [send]
     ),
   });
 
-  flushPendingRef.current = flushPending;
+  // ── 熊猫状态推导 ──
+  const mascotState: MascotState = useMemo(() => {
+    if (!running && wsStatus === "connected") return "idle";
+    if (Date.now() - startledAt < 2000) return "startled";
+    if (wsStatus !== "connected") return "idle";
+    if (isSpeaking) return "listening";
+    if (isThinking) return "thinking";
+    if (isAiSpeaking() || audioPlaying) return "speaking";
+    return "idle";
+  }, [wsStatus, isSpeaking, isThinking, audioPlaying, startledAt, isAiSpeaking]);
+
+  // Clear startled after timer
+  useEffect(() => {
+    if (startledAt === 0) return;
+    const t = setTimeout(() => setStartledAt(0), 2200);
+    return () => clearTimeout(t);
+  }, [startledAt]);
+
+  // ── 新消息自动滚到底 ──
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   // ── 模型切换 ──
   const cycleModel = () => {
@@ -93,7 +107,7 @@ export default function App() {
       {/* Top Bar */}
       <header className="top-bar">
         <div className="top-bar-left">
-          <span className="app-title">VISION TALK</span>
+          <span className="app-title">Vision Talk</span>
           <div className="status-group">
             <div className="status-item">
               <div className={`status-dot ${statusDotClass(wsStatus)}`} />
@@ -101,53 +115,66 @@ export default function App() {
             </div>
             <div className="status-item">
               <span className={`mic-indicator ${isSpeaking ? "active" : ""}`}>
-                ◉
+                {isSpeaking ? "●" : "○"}
               </span>
-              <span>{isSpeaking ? "SPEAKING" : vadState}</span>
+              <span>{isSpeaking ? "说话中" : vadState}</span>
             </div>
             <span className="frame-count">
-              FRM:{frameCount.toString().padStart(4, "0")}
+              FRM {frameCount.toString().padStart(4, "0")}
             </span>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span className="status-item" style={{ fontSize: 11 }}>
-            {diffReason}
-          </span>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          {running && diffReason && (
+            <span className="status-item" style={{ fontSize: 10, color: "var(--text-dim)" }}>
+              {diffReason}
+            </span>
+          )}
           <button className="model-chip" onClick={cycleModel}>
             {currentModel.split("/")[1] || currentModel}
+          </button>
+          <button
+            className={`toggle-btn ${running ? "on" : "off"}`}
+            onClick={() => setRunning((v) => !v)}
+          >
+            {running ? "⏸ 暂停" : "▶ 开始"}
           </button>
         </div>
       </header>
 
       {/* Main */}
       <main className="app-main">
-        {/* Camera Feed */}
-        <div className="camera-feed">
-          <Camera ref={cameraRef} width={1280} height={720} mirrored />
-          <div className="camera-osd camera-corners" />
-          <div className="camera-label">LIVE FEED</div>
-          <div className="camera-info">
-            {diffReason && (
-              <span className="camera-badge">{diffReason}</span>
+        {/* Left: Camera + VAD indicator */}
+        <div className="left-panel">
+          <div className={`camera-feed ${!running && wsStatus === "connected" ? "paused" : ""}`}>
+            <Camera ref={cameraRef} width={640} height={480} mirrored />
+            <div className="camera-label">{running ? "LIVE" : "PAUSED"}</div>
+            {(running && diffReason || audioPlaying) && (
+              <span className="camera-badge">
+                {audioPlaying ? "🔊" : diffReason}
+              </span>
             )}
-            {audioPlaying && (
-              <span className="camera-badge">AUDIO PLAYING</span>
-            )}
+          </div>
+          <div className={`vad-indicator ${running && isSpeaking ? "speaking" : ""}`}>
+            {!running ? "⏸ 已暂停" : isSpeaking ? "● 正在听" : vadState === "silence" ? "静音中" : "准备就绪"}
           </div>
         </div>
 
-        {/* Side Panel */}
-        <div className="side-panel">
-          {/* Chat HUD */}
-          <div className="chat-hud">
+        {/* Right: Mascot + Chat + Audio */}
+        <div className="right-panel">
+          <div className="mascot-area">
+            <Mascot state={mascotState} />
+          </div>
+
+          <div className="chat-panel">
             <div className="chat-header">
-              <span>TRANSCRIPT</span>
-              <span>{messages.length} msgs</span>
+              <span>对话</span>
+              <span>{messages.length} 条</span>
             </div>
             {messages.length === 0 ? (
               <div className="chat-empty">
-                开始对话 — AI 将看到你的画面
+                <span>🎤</span>
+                <span>开始说话 — AI 能看到你</span>
               </div>
             ) : (
               <div className="chat-messages">
@@ -158,10 +185,10 @@ export default function App() {
                       msg.role === "user"
                         ? "msg-user"
                         : msg.role === "system"
-                          ? "msg-system"
-                          : msg.role === "assistant-streaming"
-                            ? "msg-assistant msg-streaming"
-                            : "msg-assistant"
+                        ? "msg-system"
+                        : msg.role === "assistant-streaming"
+                        ? "msg-assistant msg-streaming"
+                        : "msg-assistant"
                     }`}
                   >
                     {msg.content}
@@ -170,18 +197,20 @@ export default function App() {
                     )}
                   </div>
                 ))}
+                <div ref={chatEndRef} />
               </div>
             )}
           </div>
 
-          {/* Audio strip */}
-          <div className="audio-strip">
+          <div className="audio-footer">
             <div className="audio-bars">
               {[...Array(5)].map((_, i) => (
                 <div key={i} className="audio-bar" />
               ))}
             </div>
-            <span>{audioPlaying ? "SPEAKING" : "STANDBY"}</span>
+            <span className="audio-label">
+              {audioPlaying ? "AI 正在说话" : "待机"}
+            </span>
           </div>
         </div>
       </main>

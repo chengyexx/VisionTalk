@@ -4,17 +4,49 @@ export type VADState = "loading" | "listening" | "error";
 
 interface UseVADOptions {
   onSpeechStart?: () => void;
-  onSpeechEnd?: () => void;
+  onSpeechEnd?: (audio: Float32Array) => void;
+}
+
+/** Float32Array PCM 16kHz → WAV → Base64 */
+function float32ToWavB64(audio: Float32Array): string {
+  const sampleRate = 16000;
+  const len = audio.length;
+  const buf = new ArrayBuffer(44 + len * 2);
+  const view = new DataView(buf);
+
+  const writeStr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + len * 2, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, len * 2, true);
+
+  let off = 44;
+  for (let i = 0; i < len; i++) {
+    const s = Math.max(-1, Math.min(1, audio[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    off += 2;
+  }
+
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
 }
 
 /**
- * Browser-side Voice Activity Detection using Silero VAD model.
- * Detects human speech in real-time from the microphone.
- *
- * Model files are served from public/models/:
- *   - silero_vad_v5.onnx     (ONNX model)
- *   - vad.worklet.bundle.min.js (AudioWorklet)
- *   - ort-wasm-*.wasm        (ONNX Runtime WASM)
+ * Browser-side Voice Activity Detection using Silero VAD v5 model.
+ * Uses VAD's built-in audio buffer — no separate MediaRecorder needed.
  */
 export function useVAD({ onSpeechStart, onSpeechEnd }: UseVADOptions = {}) {
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -26,8 +58,6 @@ export function useVAD({ onSpeechStart, onSpeechEnd }: UseVADOptions = {}) {
   const start = useCallback(async () => {
     try {
       setVadState("loading");
-
-      // Dynamic import to avoid bundling issues
       const vadModule = await import("@ricky0123/vad-web");
 
       const vad = await vadModule.MicVAD.new({
@@ -35,20 +65,20 @@ export function useVAD({ onSpeechStart, onSpeechEnd }: UseVADOptions = {}) {
           setIsSpeaking(true);
           callbacksRef.current.onSpeechStart?.();
         },
-        onSpeechEnd: () => {
+        onSpeechEnd: (audio: Float32Array) => {
           setIsSpeaking(false);
-          callbacksRef.current.onSpeechEnd?.();
+          if (audio && audio.length > 0) {
+            const b64 = float32ToWavB64(audio);
+            (_vadAudioRef as any).current = b64;
+            callbacksRef.current.onSpeechEnd?.(audio);
+          }
         },
-        onVADMisfire: () => {
-          // Brief noise detected, not sustained speech
-        },
-        // v5 model is smaller and faster than legacy
+        onVADMisfire: () => {},
         model: "v5",
-        // ONNX model + AudioWorklet → served from public/models/
         baseAssetPath: "/models/",
-        // onnxruntime-web WASM 不能放 /public (Vite 禁止动态 import):
-        // 走 jsDelivr CDN 加载 .wasm + .mjs, 避免 Vite 报 404
-        ortConfig: (ort) => {
+        // 更快检测到语音开头 (默认 400ms → 150ms)
+        minSpeechMs: 150,
+        ortConfig: (ort: any) => {
           ort.env.wasm.wasmPaths =
             "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/";
         },
@@ -73,10 +103,14 @@ export function useVAD({ onSpeechStart, onSpeechEnd }: UseVADOptions = {}) {
 
   useEffect(() => {
     start();
-    return () => {
-      stop();
-    };
+    return () => { stop(); };
   }, [start, stop]);
 
   return { isSpeaking, vadState, start, stop };
+}
+
+/** Ref to access latest VAD audio Base64 — set by onSpeechEnd callback */
+const _vadAudioRef = { current: "" };
+export function getVadAudioB64(): string {
+  return _vadAudioRef.current;
 }

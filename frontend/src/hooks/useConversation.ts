@@ -34,6 +34,7 @@ export function useConversation({ wsUrl, onInterrupt, onAiIdle }: UseConversatio
 
   const { playing: audioPlaying, playChunk, stop: stopAudio } = useAudioPlayback();
   const isAiSpeakingRef = useRef(false);
+  const [isThinking, setIsThinking] = useState(false);
 
   // ── WebSocket 消息分发 ──
   const onWsMessage = useCallback(
@@ -49,9 +50,13 @@ export function useConversation({ wsUrl, onInterrupt, onAiIdle }: UseConversatio
         }
         case "state_change": {
           const st = m.state as string;
-          if (st === "thinking") isAiSpeakingRef.current = true;
+          if (st === "thinking") {
+            isAiSpeakingRef.current = true;
+            setIsThinking(true);
+          }
           if (st === "idle") {
             isAiSpeakingRef.current = false;
+            setIsThinking(false);
             onAiIdle?.();
           }
           setMessages((p) => [
@@ -62,6 +67,7 @@ export function useConversation({ wsUrl, onInterrupt, onAiIdle }: UseConversatio
         }
         case "vlm_token": {
           const tok = m.text as string;
+          setIsThinking(false);  // first token = thinking done, speaking started
           setMessages((prev) => {
             const last = prev[prev.length - 1];
             if (last?.role === "assistant-streaming") {
@@ -93,6 +99,7 @@ export function useConversation({ wsUrl, onInterrupt, onAiIdle }: UseConversatio
         case "turn_end": {
           const p = m.payload as Record<string, unknown>;
           const vlm = (p?.vlm_response as string) || "";
+          setIsThinking(false);
           if (p?.error) {
             setMessages((prev) => [...prev, newMsg("system", `错误: ${p.error}`)]);
             return;
@@ -175,6 +182,7 @@ export function useConversation({ wsUrl, onInterrupt, onAiIdle }: UseConversatio
     currentModel,
     audioPlaying,
     isAiSpeaking: () => isAiSpeakingRef.current,
+    isThinking,
     send,
     switchModel,
     interrupt,

@@ -32,8 +32,9 @@ class Config:
     ]
 
     ASR_MODELS: list[str] = [
-        "whisper-large-v3",             # Groq Whisper (推荐，免费额度)
-        "whisper-large-v3-turbo",        # Groq Whisper Turbo (更快)
+        "FunAudioLLM/SenseVoiceSmall",  # 硅基流动 SenseVoice (中文原生，免费，国内直连)
+        "whisper-large-v3",             # Groq Whisper (备选)
+        "whisper-large-v3-turbo",        # Groq Whisper Turbo (备选)
         "whisper-1",                     # OpenAI Whisper
     ]
 
