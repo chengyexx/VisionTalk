@@ -2,6 +2,10 @@
 
 实时摄像头 + 语音对话。AI 看到你的画面、听懂你的话、用语音回复你。
 
+## 演示视频
+
+🎬 **Vision Talk — 集成视觉听觉的聊天机器人**：https://www.bilibili.com/video/BV1qqLX6QEqH/
+
 ## 架构
 
 ```
