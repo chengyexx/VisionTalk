@@ -132,4 +132,3 @@ frontend/
 | POST | `/api/model/switch` | 切换 VLM 模型 |
 | WS | `/ws` | WebSocket 全双工对话 |
 
-
